@@ -53,6 +53,8 @@ app.get("/api/auth/status", (req, res) => {
   const isConfigured = isSupabaseConfigured();
   res.json({
     supabaseConfigured: isConfigured,
+    supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
+    supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY,
     geminiConfigured: !!process.env.GEMINI_API_KEY,
     demoMode: !isConfigured || !process.env.GEMINI_API_KEY,
     message: isConfigured 
@@ -70,10 +72,12 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
 
     let rawText = "";
 
-    if (req.file.mimetype === "application/pdf") {
-      // Parse buffer using the PDFParse class from mehmet-kozan/pdf-parse
-      const parser = new pdf.PDFParse({ data: req.file.buffer });
-      const parsedData = await parser.getText();
+    const isPdf = req.file.mimetype === "application/pdf" || 
+                  (req.file.originalname && req.file.originalname.toLowerCase().endsWith(".pdf"));
+
+    if (isPdf) {
+      // Parse buffer using the classic pdf-parse package
+      const parsedData = await pdf(req.file.buffer);
       rawText = parsedData.text || "";
     } else {
       // Fallback for docx/txt
