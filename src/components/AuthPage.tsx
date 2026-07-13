@@ -26,9 +26,9 @@ export const AuthPage: React.FC = () => {
     setIsSubmitting(true);
     try {
       if (authMode === "signin") {
-        await login(email);
+        await login(email, undefined, password);
       } else {
-        await signup(email, name);
+        await signup(email, name, password);
       }
     } catch (err: any) {
       setError(err.message || "Authentication failed. Try again.");
@@ -44,13 +44,25 @@ export const AuthPage: React.FC = () => {
       // For Supabase live google auth, we would redirect.
       // We will perform a clean redirect if Supabase is connected,
       // otherwise we'll run a beautiful mock login for our preview/sandbox!
-      if (status?.supabaseConfigured) {
-        // Real Google login redirect using Supabase (or redirecting to auth callbacks)
+      if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
         setError("Redirecting to Google Sign-In...");
-        // Simulation / mock login on sandbox is extremely pleasant for immediate testing
-        setTimeout(() => {
-          login("google-user@gmail.com", "Google Dev User");
-        }, 1000);
+        const { createClient } = await import("@supabase/supabase-js");
+        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
+        
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: {
+            redirectTo: window.location.origin,
+            queryParams: {
+              prompt: "select_account",
+              access_type: "offline"
+            }
+          }
+        });
+        
+        if (error) {
+          throw error;
+        }
       } else {
         // Beautiful simulation response
         setTimeout(() => {
@@ -58,7 +70,8 @@ export const AuthPage: React.FC = () => {
         }, 1000);
       }
     } catch (err: any) {
-      setError("Google Sign-In failed.");
+      console.error("Google Sign-In error:", err);
+      setError(err.message || "Google Sign-In failed.");
       setIsSubmitting(false);
     }
   };
@@ -77,14 +90,6 @@ export const AuthPage: React.FC = () => {
           </div>
           <span className="font-display font-semibold tracking-tight text-xl text-white">JobRadar</span>
         </div>
-        
-        {/* Sandbox indicator */}
-        {status?.demoMode && (
-          <div className="flex items-center gap-1.5 bg-zinc-900 border border-white/10 text-zinc-400 text-xs px-3 py-1.5 rounded-lg">
-            <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-            <span>Sandbox Preview Mode</span>
-          </div>
-        )}
       </div>
 
       {/* Centered Auth Card */}
