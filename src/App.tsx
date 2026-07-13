@@ -116,13 +116,13 @@ function MainDashboard() {
             <div className="hidden md:flex items-center gap-1.5 bg-zinc-900 border border-white/10 text-zinc-400 text-xs px-3 py-1.5 rounded-lg">
               {status?.demoMode ? (
                 <>
-                  <Sparkles className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
-                  <span>Sandbox Preview Mode</span>
+                  <div className="w-2 h-2 rounded-full bg-zinc-500" />
+                  <span>Local Session Mode</span>
                 </>
               ) : (
                 <>
                   <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                  <span>Supabase Live Connected</span>
+                  <span>Database Connected</span>
                 </>
               )}
             </div>
