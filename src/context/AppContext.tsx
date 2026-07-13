@@ -3,6 +3,8 @@ import { Profile, Resume, JobMatch, ApplicationHistory, ParsedResume, COUNTRIES 
 
 interface AuthStatus {
   supabaseConfigured: boolean;
+  supabaseUrl?: string;
+  supabaseAnonKey?: string;
   geminiConfigured: boolean;
   demoMode: boolean;
   message: string;
@@ -25,8 +27,8 @@ interface AppContextType {
   editingResumeId: string | null;
   setEditingResumeId: (id: string | null) => void;
   
-  login: (email: string, name?: string) => Promise<void>;
-  signup: (email: string, name: string) => Promise<void>;
+  login: (email: string, name?: string, password?: string) => Promise<void>;
+  signup: (email: string, name: string, password?: string) => Promise<void>;
   logout: () => void;
   uploadResume: (file: File) => Promise<ParsedResume>;
   confirmResume: (parsed: ParsedResume) => Promise<void>;
@@ -35,6 +37,16 @@ interface AppContextType {
   updateCountry: (country: string) => Promise<void>;
   activateResumeVersion: (resumeId: string) => Promise<void>;
   updateResume: (resumeId: string, parsed: ParsedResume) => Promise<void>;
+}
+
+function emailToUUID(email: string): string {
+  let hash = 0;
+  for (let i = 0; i < email.length; i++) {
+    hash = (hash << 5) - hash + email.charCodeAt(i);
+    hash |= 0;
+  }
+  const seed = Math.abs(hash).toString(16).padEnd(32, 'a');
+  return `${seed.substring(0, 8)}-${seed.substring(8, 12)}-4${seed.substring(12, 15)}-a${seed.substring(15, 18)}-${seed.substring(18, 30)}`;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -57,9 +69,108 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     fetch("/api/auth/status")
       .then(res => res.json())
-      .then((data: AuthStatus) => {
+      .then(async (data: AuthStatus) => {
         setStatus(data);
         setIsLoading(false);
+
+        // If Supabase is configured, check for a live session!
+        if (data.supabaseConfigured && data.supabaseUrl && data.supabaseAnonKey) {
+          try {
+            const { createClient } = await import("@supabase/supabase-js");
+            const supabase = createClient(data.supabaseUrl, data.supabaseAnonKey);
+
+            // Get session
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session?.user) {
+              const googleUser = {
+                id: session.user.id,
+                email: session.user.email || "",
+                name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email?.split("@")[0] || "Google User"
+              };
+
+              // Upsert profile in DB
+              try {
+                await fetch("/api/profile", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    user_id: googleUser.id,
+                    email: googleUser.email,
+                    name: googleUser.name,
+                    preferred_country: "us"
+                  })
+                });
+              } catch (pErr) {
+                console.error("Error upserting Google profile on load:", pErr);
+              }
+
+              localStorage.setItem("jobradar_user", JSON.stringify(googleUser));
+              setUser(googleUser);
+            } else {
+              // Try local user fallback
+              const savedUser = localStorage.getItem("jobradar_user");
+              if (savedUser) {
+                const parsed = JSON.parse(savedUser);
+                if (parsed.id && parsed.id.startsWith("usr_")) {
+                  parsed.id = emailToUUID(parsed.email);
+                  localStorage.setItem("jobradar_user", JSON.stringify(parsed));
+                }
+                setUser(parsed);
+              }
+            }
+
+            // Listen for auth state changes
+            supabase.auth.onAuthStateChange(async (event, session) => {
+              if (session?.user) {
+                const googleUser = {
+                  id: session.user.id,
+                  email: session.user.email || "",
+                  name: session.user.user_metadata?.full_name || session.user.user_metadata?.name || session.user.email?.split("@")[0] || "Google User"
+                };
+
+                try {
+                  await fetch("/api/profile", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      user_id: googleUser.id,
+                      email: googleUser.email,
+                      name: googleUser.name,
+                      preferred_country: "us"
+                    })
+                  });
+                } catch (pErr) {
+                  console.error("Error upserting Google profile on change:", pErr);
+                }
+
+                localStorage.setItem("jobradar_user", JSON.stringify(googleUser));
+                setUser(googleUser);
+              }
+            });
+          } catch (supaErr) {
+            console.error("Failed to initialize dynamic client-side Supabase client:", supaErr);
+            const savedUser = localStorage.getItem("jobradar_user");
+            if (savedUser) {
+              const parsed = JSON.parse(savedUser);
+              if (parsed.id && parsed.id.startsWith("usr_")) {
+                parsed.id = emailToUUID(parsed.email);
+                localStorage.setItem("jobradar_user", JSON.stringify(parsed));
+              }
+              setUser(parsed);
+            }
+          }
+        } else {
+          // Standard mock fallback
+          const savedUser = localStorage.getItem("jobradar_user");
+          if (savedUser) {
+            const parsed = JSON.parse(savedUser);
+            if (parsed.id && parsed.id.startsWith("usr_")) {
+              parsed.id = emailToUUID(parsed.email);
+              localStorage.setItem("jobradar_user", JSON.stringify(parsed));
+            }
+            setUser(parsed);
+          }
+        }
       })
       .catch(err => {
         console.error("Failed to fetch auth status", err);
@@ -70,13 +181,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           message: "API service is initializing."
         });
         setIsLoading(false);
-      });
 
-    // Load any existing session from localStorage
-    const savedUser = localStorage.getItem("jobradar_user");
-    if (savedUser) {
-      setUser(JSON.parse(savedUser));
-    }
+        const savedUser = localStorage.getItem("jobradar_user");
+        if (savedUser) {
+          const parsed = JSON.parse(savedUser);
+          if (parsed.id && parsed.id.startsWith("usr_")) {
+            parsed.id = emailToUUID(parsed.email);
+            localStorage.setItem("jobradar_user", JSON.stringify(parsed));
+          }
+          setUser(parsed);
+        }
+      });
   }, []);
 
   // 2. Fetch user-scoped profile, resume, matches, history when logged in
@@ -170,28 +285,147 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Sign-in
-  const login = async (email: string, name?: string) => {
+  const login = async (email: string, name?: string, password?: string) => {
     const defaultName = name || email.split("@")[0];
-    const loggedUser = {
-      id: "usr_" + email.replace(/[^a-zA-Z0-9]/g, ""),
-      email,
-      name: defaultName
-    };
+    let loggedUser = null;
+
+    if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
+      try {
+        const { createClient } = await import("@supabase/supabase-js");
+        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
+        
+        const { data, error } = await supabase.auth.signInWithPassword({
+          email,
+          password: password || "default123!"
+        });
+        
+        if (error) {
+          throw error;
+        }
+        
+        if (data.user) {
+          loggedUser = {
+            id: data.user.id,
+            email: data.user.email || email,
+            name: data.user.user_metadata?.full_name || data.user.user_metadata?.name || defaultName
+          };
+        }
+      } catch (err: any) {
+        console.error("Live Supabase signInWithPassword error, checking if fallback needed:", err);
+        throw err;
+      }
+    }
+    
+    if (!loggedUser) {
+      loggedUser = {
+        id: emailToUUID(email),
+        email,
+        name: defaultName
+      };
+    }
+
+    // Save login details (profile) to the database immediately!
+    try {
+      await fetch("/api/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: loggedUser.id,
+          email: loggedUser.email,
+          name: loggedUser.name,
+          preferred_country: "us"
+        })
+      });
+    } catch (err) {
+      console.error("Failed to save login profile to database:", err);
+    }
+
     localStorage.setItem("jobradar_user", JSON.stringify(loggedUser));
     setUser(loggedUser);
   };
 
   // Sign-up
-  const signup = async (email: string, name: string) => {
-    await login(email, name);
+  const signup = async (email: string, name: string, password?: string) => {
+    let loggedUser = null;
+
+    if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
+      try {
+        const { createClient } = await import("@supabase/supabase-js");
+        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
+        
+        const { data, error } = await supabase.auth.signUp({
+          email,
+          password: password || "default123!",
+          options: {
+            data: {
+              full_name: name
+            }
+          }
+        });
+        
+        if (error) {
+          throw error;
+        }
+        
+        if (data.user) {
+          loggedUser = {
+            id: data.user.id,
+            email: data.user.email || email,
+            name: data.user.user_metadata?.full_name || name
+          };
+        }
+      } catch (err: any) {
+        console.error("Live Supabase signUp error:", err);
+        throw err;
+      }
+    }
+    
+    if (!loggedUser) {
+      loggedUser = {
+        id: emailToUUID(email),
+        email,
+        name
+      };
+    }
+
+    // Save login details (profile) to the database immediately!
+    try {
+      await fetch("/api/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: loggedUser.id,
+          email: loggedUser.email,
+          name: loggedUser.name,
+          preferred_country: "us"
+        })
+      });
+    } catch (err) {
+      console.error("Failed to save signup profile to database:", err);
+    }
+
+    localStorage.setItem("jobradar_user", JSON.stringify(loggedUser));
+    setUser(loggedUser);
   };
 
   // Log-out
-  const logout = () => {
+  const logout = async () => {
     localStorage.removeItem("jobradar_user");
     setUser(null);
     setResumes([]);
     setCurrentParsedReview(null);
+    setMatches([]);
+    setHistory([]);
+
+    if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
+      try {
+        const { createClient } = await import("@supabase/supabase-js");
+        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
+        await supabase.auth.signOut();
+      } catch (err) {
+        console.warn("Failed to sign out from Supabase Auth:", err);
+      }
+    }
   };
 
   // Upload Resume file for parsing
