@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import multer from "multer";
-import { createServer as createViteServer } from "vite";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const pdf = require("pdf-parse/lib/pdf-parse.js");
@@ -488,6 +487,7 @@ async function runJobMatchingPipelineForUser(
 // ==========================================
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
