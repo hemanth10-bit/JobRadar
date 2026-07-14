@@ -11,9 +11,9 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { parseResumeText, extractJobRequirements, scoreJobMatch } from "./src/lib/ai.js";
-import { generateEmbedding } from "./src/lib/embeddings.ts";
+import { generateEmbedding } from "./src/lib/embeddings.js";
 import { DbService, isSupabaseConfigured, localDB, getSupabaseClient } from "./src/lib/db.js";
-import { JobSourcesManager } from "./src/lib/job_sources.ts";
+import { JobSourcesManager } from "./src/lib/job_sources.js";
 
 const app = express();
 const PORT = 3000;
