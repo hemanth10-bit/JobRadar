@@ -17,11 +17,10 @@ export function generateMockEmbedding(dimension = 768): number[] {
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   const ai = getGeminiClient();
-  
+
   // Truncate text if it's excessively long to fit embedding model input constraints
   const cleanedText = (text || "").substring(0, 8000).replace(/\s+/g, ' ').trim();
   const textToEmbed = cleanedText || "resume skills professional profile";
-
   try {
     let response: any;
     try {
@@ -30,13 +29,13 @@ export async function generateEmbedding(text: string): Promise<number[]> {
         contents: textToEmbed,
       }) as any;
     } catch (previewErr) {
-      console.warn("gemini-embedding-2-preview failed, trying text-embedding-004 fallback...", previewErr);
+      // NOTE: text-embedding-004 was shut down by Google — do not revert to it.
+      console.warn("gemini-embedding-2-preview failed, trying gemini-embedding-001 fallback...", previewErr);
       response = await ai.models.embedContent({
-        model: "text-embedding-004",
+        model: "gemini-embedding-001",
         contents: textToEmbed,
       }) as any;
     }
-
     if (response) {
       if (response.embedding && response.embedding.values) {
         return response.embedding.values;
@@ -45,7 +44,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
         return response.embeddings[0].values;
       }
     }
-    
+
     throw new Error("Invalid embedding response structure from Gemini API");
   } catch (err: any) {
     console.error("Error generating embedding, returning mock vector:", err);
