@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from "react";
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { Profile, Resume, JobMatch, ApplicationHistory, ParsedResume, COUNTRIES } from "../types.js";
 
 interface AuthStatus {
@@ -65,6 +66,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentParsedReview, setCurrentParsedReview] = useState<ParsedResume | null>(null);
   const [editingResumeId, setEditingResumeId] = useState<string | null>(null);
 
+  // Single reused Supabase client + current session access token, used to attach
+  // Authorization: Bearer <token> to user-scoped API calls so the server can
+  // verify caller identity instead of trusting a client-supplied userId.
+  const supabaseRef = useRef<SupabaseClient | null>(null);
+  const accessTokenRef = useRef<string | null>(null);
+
+  const getOrCreateSupabaseClient = useCallback(async (url: string, anonKey: string) => {
+    if (!supabaseRef.current) {
+      const { createClient } = await import("@supabase/supabase-js");
+      supabaseRef.current = createClient(url, anonKey);
+    }
+    return supabaseRef.current;
+  }, []);
+
+  // Wraps fetch to attach the current Supabase session's bearer token, when one
+  // exists. In demo mode (no Supabase session) this behaves like a plain fetch.
+  const apiFetch = useCallback((url: string, options: RequestInit = {}) => {
+    const token = accessTokenRef.current;
+    if (!token) {
+      return fetch(url, options);
+    }
+    const headers = new Headers(options.headers || {});
+    headers.set("Authorization", `Bearer ${token}`);
+    return fetch(url, { ...options, headers });
+  }, []);
+
   // 1. Fetch system & configuration status on mount
   useEffect(() => {
     fetch("/api/auth/status")
@@ -76,11 +103,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // If Supabase is configured, check for a live session!
         if (data.supabaseConfigured && data.supabaseUrl && data.supabaseAnonKey) {
           try {
-            const { createClient } = await import("@supabase/supabase-js");
-            const supabase = createClient(data.supabaseUrl, data.supabaseAnonKey);
+            const supabase = await getOrCreateSupabaseClient(data.supabaseUrl, data.supabaseAnonKey);
 
             // Get session
             const { data: { session } } = await supabase.auth.getSession();
+            accessTokenRef.current = session?.access_token || null;
             if (session?.user) {
               const googleUser = {
                 id: session.user.id,
@@ -90,7 +117,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
               // Upsert profile in DB
               try {
-                await fetch("/api/profile", {
+                await apiFetch("/api/profile", {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -121,6 +148,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
             // Listen for auth state changes
             supabase.auth.onAuthStateChange(async (event, session) => {
+              accessTokenRef.current = session?.access_token || null;
               if (session?.user) {
                 const googleUser = {
                   id: session.user.id,
@@ -129,7 +157,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 };
 
                 try {
-                  await fetch("/api/profile", {
+                  await apiFetch("/api/profile", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
@@ -207,15 +235,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const loadUserData = async () => {
       try {
         // Fetch or create profile
-        const profRes = await fetch(`/api/profile/${user.id}`);
+        const profRes = await apiFetch(`/api/profile/${user.id}`);
         let profData = null;
         if (profRes.ok) {
           profData = await profRes.json();
         }
-        
+
         if (!profData) {
           // Create initial profile
-          const upsertRes = await fetch("/api/profile", {
+          const upsertRes = await apiFetch("/api/profile", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -232,7 +260,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setProfile(profData);
 
         // Fetch resumes
-        const resumesRes = await fetch(`/api/resumes/${user.id}`);
+        const resumesRes = await apiFetch(`/api/resumes/${user.id}`);
         if (resumesRes.ok) {
           const resumesData = await resumesRes.json();
           setResumes(resumesData);
@@ -245,14 +273,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         // Fetch matches
-        const matchesRes = await fetch(`/api/matches/${user.id}`);
+        const matchesRes = await apiFetch(`/api/matches/${user.id}`);
         if (matchesRes.ok) {
           const matchesData = await matchesRes.json();
           setMatches(matchesData);
         }
 
         // Fetch application history
-        const histRes = await fetch(`/api/history/${user.id}`);
+        const histRes = await apiFetch(`/api/history/${user.id}`);
         if (histRes.ok) {
           const histData = await histRes.json();
           setHistory(histData);
@@ -269,12 +297,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const reloadMatchesAndHistory = async () => {
     if (!user) return;
     try {
-      const matchesRes = await fetch(`/api/matches/${user.id}`);
+      const matchesRes = await apiFetch(`/api/matches/${user.id}`);
       if (matchesRes.ok) {
         const matchesData = await matchesRes.json();
         setMatches(matchesData);
       }
-      const histRes = await fetch(`/api/history/${user.id}`);
+      const histRes = await apiFetch(`/api/history/${user.id}`);
       if (histRes.ok) {
         const histData = await histRes.json();
         setHistory(histData);
@@ -291,18 +319,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
       try {
-        const { createClient } = await import("@supabase/supabase-js");
-        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
-        
+        const supabase = await getOrCreateSupabaseClient(status.supabaseUrl, status.supabaseAnonKey);
+
         const { data, error } = await supabase.auth.signInWithPassword({
           email,
           password: password || "default123!"
         });
-        
+
         if (error) {
           throw error;
         }
-        
+
+        accessTokenRef.current = data.session?.access_token || null;
+
         if (data.user) {
           loggedUser = {
             id: data.user.id,
@@ -315,7 +344,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         throw err;
       }
     }
-    
+
     if (!loggedUser) {
       loggedUser = {
         id: emailToUUID(email),
@@ -326,7 +355,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Save login details (profile) to the database immediately!
     try {
-      await fetch("/api/profile", {
+      await apiFetch("/api/profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -350,9 +379,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
       try {
-        const { createClient } = await import("@supabase/supabase-js");
-        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
-        
+        const supabase = await getOrCreateSupabaseClient(status.supabaseUrl, status.supabaseAnonKey);
+
         const { data, error } = await supabase.auth.signUp({
           email,
           password: password || "default123!",
@@ -362,11 +390,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           }
         });
-        
+
         if (error) {
           throw error;
         }
-        
+
+        accessTokenRef.current = data.session?.access_token || null;
+
         if (data.user) {
           loggedUser = {
             id: data.user.id,
@@ -379,7 +409,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         throw err;
       }
     }
-    
+
     if (!loggedUser) {
       loggedUser = {
         id: emailToUUID(email),
@@ -390,7 +420,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Save login details (profile) to the database immediately!
     try {
-      await fetch("/api/profile", {
+      await apiFetch("/api/profile", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -417,10 +447,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setMatches([]);
     setHistory([]);
 
+    accessTokenRef.current = null;
+
     if (status?.supabaseConfigured && status.supabaseUrl && status.supabaseAnonKey) {
       try {
-        const { createClient } = await import("@supabase/supabase-js");
-        const supabase = createClient(status.supabaseUrl, status.supabaseAnonKey);
+        const supabase = await getOrCreateSupabaseClient(status.supabaseUrl, status.supabaseAnonKey);
         await supabase.auth.signOut();
       } catch (err) {
         console.warn("Failed to sign out from Supabase Auth:", err);
@@ -453,7 +484,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!user) return;
     setIsPipelineRunning(true);
     try {
-      const res = await fetch("/api/resume/confirm", {
+      const res = await apiFetch("/api/resume/confirm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -470,9 +501,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const data = await res.json();
       setActiveResume(data.resume);
       setCurrentParsedReview(null);
-      
+
       // Fetch resumes
-      const resumesRes = await fetch(`/api/resumes/${user.id}`);
+      const resumesRes = await apiFetch(`/api/resumes/${user.id}`);
       if (resumesRes.ok) {
         const resumesData = await resumesRes.json();
         setResumes(resumesData);
@@ -490,7 +521,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!user) return;
     setIsPipelineRunning(true);
     try {
-      const res = await fetch("/api/pipeline/search-match", {
+      const res = await apiFetch("/api/pipeline/search-match", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -523,9 +554,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!user || !profile) return;
     const updatedProfile = { ...profile, preferred_country: country };
     setProfile(updatedProfile);
-    
+
     // Save to server
-    await fetch("/api/profile", {
+    await apiFetch("/api/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updatedProfile)
@@ -539,7 +570,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateMatchStatus = async (matchId: string, status: JobMatch['status']) => {
     if (!user) return;
     try {
-      const res = await fetch(`/api/matches/${matchId}`, {
+      const res = await apiFetch(`/api/matches/${matchId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -559,7 +590,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const activateResumeVersion = async (resumeId: string) => {
     if (!user) return;
     try {
-      const res = await fetch("/api/resume/activate", {
+      const res = await apiFetch("/api/resume/activate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ userId: user.id, resumeId })
@@ -581,7 +612,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!user) return;
     setIsPipelineRunning(true);
     try {
-      const res = await fetch("/api/resume/update", {
+      const res = await apiFetch("/api/resume/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

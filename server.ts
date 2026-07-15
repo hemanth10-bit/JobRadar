@@ -1,9 +1,7 @@
 import express from "express";
 import path from "path";
 import multer from "multer";
-import { createRequire } from "module";
-const require = createRequire(import.meta.url);
-const pdf = require("pdf-parse/lib/pdf-parse.js");
+import { PDFParse } from "pdf-parse";
 import dotenv from "dotenv";
 
 // Load environment variables
@@ -13,6 +11,7 @@ import { parseResumeText, extractJobRequirements, scoreJobMatch } from "./src/li
 import { generateEmbedding } from "./src/lib/embeddings.js";
 import { DbService, isSupabaseConfigured, localDB, getSupabaseClient } from "./src/lib/db.js";
 import { JobSourcesManager } from "./src/lib/job_sources.js";
+import { resolveUserId, asyncHandler } from "./src/lib/auth.js";
 
 const app = express();
 const PORT = 3000;
@@ -76,8 +75,13 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
                   (req.file.originalname && req.file.originalname.toLowerCase().endsWith(".pdf"));
 
     if (isPdf) {
-      const parsedData = await pdf(req.file.buffer);
-      rawText = parsedData.text || "";
+      const parser = new PDFParse({ data: req.file.buffer });
+      try {
+        const parsedData = await parser.getText();
+        rawText = parsedData.text || "";
+      } finally {
+        await parser.destroy();
+      }
     } else {
       rawText = req.file.buffer.toString("utf-8");
     }
@@ -95,11 +99,12 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
 });
 
 // Confirm resume route (generate embedding + trigger pipeline)
-app.post("/api/resume/confirm", async (req, res) => {
-  const { userId, parsedResume, rawFileUrl } = req.body;
-  if (!userId || !parsedResume) {
-    return res.status(400).json({ error: "Missing userId or parsedResume data" });
+app.post("/api/resume/confirm", asyncHandler(async (req, res) => {
+  const { parsedResume, rawFileUrl } = req.body;
+  if (!parsedResume) {
+    return res.status(400).json({ error: "Missing parsedResume data" });
   }
+  const userId = await resolveUserId(req, req.body.userId);
 
   try {
     let embedding: number[] | undefined;
@@ -132,38 +137,41 @@ app.post("/api/resume/confirm", async (req, res) => {
     console.error("Confirm resume error:", err);
     res.status(500).json({ error: err.message || "Failed to confirm and save resume" });
   }
-});
+}));
 
 // Get all resumes for a user
-app.get("/api/resumes/:userId", async (req, res) => {
+app.get("/api/resumes/:userId", asyncHandler(async (req, res) => {
+  const userId = await resolveUserId(req, req.params.userId);
   try {
-    const resumes = await DbService.getResumes(req.params.userId);
+    const resumes = await DbService.getResumes(userId);
     res.json(resumes);
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to retrieve resumes" });
   }
-});
+}));
 
 // Activate a specific resume
-app.post("/api/resume/activate", async (req, res) => {
-  const { userId, resumeId } = req.body;
-  if (!userId || !resumeId) {
-    return res.status(400).json({ error: "Missing userId or resumeId" });
+app.post("/api/resume/activate", asyncHandler(async (req, res) => {
+  const { resumeId } = req.body;
+  if (!resumeId) {
+    return res.status(400).json({ error: "Missing resumeId" });
   }
+  const userId = await resolveUserId(req, req.body.userId);
   try {
     const activeResume = await DbService.activateResume(userId, resumeId);
     res.json({ success: true, resume: activeResume });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to activate resume" });
   }
-});
+}));
 
 // Update an existing resume's parsed details
-app.post("/api/resume/update", async (req, res) => {
-  const { userId, resumeId, parsedResume } = req.body;
-  if (!userId || !resumeId || !parsedResume) {
+app.post("/api/resume/update", asyncHandler(async (req, res) => {
+  const { resumeId, parsedResume } = req.body;
+  if (!resumeId || !parsedResume) {
     return res.status(400).json({ error: "Missing required fields" });
   }
+  const userId = await resolveUserId(req, req.body.userId);
 
   try {
     let embedding: number[] | undefined;
@@ -193,23 +201,25 @@ app.post("/api/resume/update", async (req, res) => {
     console.error("Update resume error:", err);
     res.status(500).json({ error: err.message || "Failed to update resume" });
   }
-});
+}));
 
 // Trigger matching pipeline manually
-app.post("/api/pipeline/search-match", async (req, res) => {
-  const { userId, country, bypassCronCheck } = req.body;
+app.post("/api/pipeline/search-match", asyncHandler(async (req, res) => {
+  const { country } = req.body;
+
+  // Two valid callers: (a) a trusted service/cron holding CRON_SECRET, which may
+  // act on behalf of any userId, or (b) an authenticated end user triggering their
+  // own refresh, whose identity must be verified against the claimed userId.
+  const authHeader = req.headers.authorization;
+  const presentedCronToken = authHeader?.startsWith("Bearer ") ? authHeader.split(" ")[1] : undefined;
+  const isTrustedCronCall = !!presentedCronToken && presentedCronToken === (process.env.CRON_SECRET || "default_cron_secret");
+
+  const userId = isTrustedCronCall
+    ? req.body.userId
+    : await resolveUserId(req, req.body.userId);
+
   if (!userId) {
     return res.status(400).json({ error: "Missing userId" });
-  }
-
-  if (!bypassCronCheck) {
-    const authHeader = req.headers.authorization;
-    if (authHeader) {
-      const token = authHeader.split(" ")[1];
-      if (token !== (process.env.CRON_SECRET || "default_cron_secret")) {
-        return res.status(403).json({ error: "Unauthorized manual pipeline trigger" });
-      }
-    }
   }
 
   try {
@@ -240,42 +250,46 @@ app.post("/api/pipeline/search-match", async (req, res) => {
     console.error("Pipeline run failed:", err);
     res.status(500).json({ error: err.message || "Pipeline run failed" });
   }
-});
+}));
 
 // Profile endpoints
-app.get("/api/profile/:userId", async (req, res) => {
+app.get("/api/profile/:userId", asyncHandler(async (req, res) => {
+  const userId = await resolveUserId(req, req.params.userId);
   try {
-    const profile = await DbService.getProfile(req.params.userId);
+    const profile = await DbService.getProfile(userId);
     res.json(profile);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
-app.post("/api/profile", async (req, res) => {
+app.post("/api/profile", asyncHandler(async (req, res) => {
+  const userId = await resolveUserId(req, req.body.user_id);
   try {
-    const profile = await DbService.upsertProfile(req.body);
+    const profile = await DbService.upsertProfile({ ...req.body, user_id: userId });
     res.json(profile);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // Matches endpoints
-app.get("/api/matches/:userId", async (req, res) => {
+app.get("/api/matches/:userId", asyncHandler(async (req, res) => {
+  const userId = await resolveUserId(req, req.params.userId);
   try {
-    const matches = await DbService.getJobMatches(req.params.userId);
+    const matches = await DbService.getJobMatches(userId);
     res.json(matches);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
-app.patch("/api/matches/:matchId", async (req, res) => {
-  const { userId, status } = req.body;
-  if (!userId || !status) {
-    return res.status(400).json({ error: "Missing userId or status" });
+app.patch("/api/matches/:matchId", asyncHandler(async (req, res) => {
+  const { status } = req.body;
+  if (!status) {
+    return res.status(400).json({ error: "Missing status" });
   }
+  const userId = await resolveUserId(req, req.body.userId);
 
   try {
     await DbService.updateJobMatchStatus(userId, req.params.matchId, status);
@@ -298,17 +312,18 @@ app.patch("/api/matches/:matchId", async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // Application History endpoints
-app.get("/api/history/:userId", async (req, res) => {
+app.get("/api/history/:userId", asyncHandler(async (req, res) => {
+  const userId = await resolveUserId(req, req.params.userId);
   try {
-    const history = await DbService.getApplicationHistory(req.params.userId);
+    const history = await DbService.getApplicationHistory(userId);
     res.json(history);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
+}));
 
 // Cron Daily Pipeline
 app.post("/api/cron/daily", checkCronSecret, async (req, res) => {
