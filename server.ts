@@ -11,6 +11,7 @@ import { generateEmbedding } from "./src/lib/embeddings.js";
 import { DbService, isSupabaseConfigured, localDB, getSupabaseClient } from "./src/lib/db.js";
 import { JobSourcesManager } from "./src/lib/job_sources.js";
 import { resolveUserId, asyncHandler } from "./src/lib/auth.js";
+import { parseResumeDeterministic, parseJobRequirementsDeterministic } from "./src/lib/deterministic_parser.js";
 
 const app = express();
 const PORT = 3000;
@@ -98,7 +99,16 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
       return res.status(400).json({ error: "Failed to extract text from resume. Ensure the file is not empty or protected." });
     }
 
-    const parsedJson = await parseResumeText(rawText);
+    // Try free deterministic parsing (regex + skill dictionary) first — it's
+    // instant, has no external dependency, and covers the common case well.
+    // Only fall back to the LLM when its result looks low-confidence (sparse
+    // matches, unusual formatting), which keeps Gemini calls — and exposure
+    // to its rate limits/outages — to a fraction of uploads.
+    const deterministic = parseResumeDeterministic(rawText);
+    const parsedJson = deterministic.confident
+      ? deterministic.data
+      : await parseResumeText(rawText);
+
     res.json({ success: true, text: rawText.substring(0, 500), parsed: parsedJson });
   } catch (err: any) {
     console.error("Resume parsing failure:", err);
@@ -439,7 +449,10 @@ async function runJobMatchingPipelineForUser(
 
       if (!job.requirements_json || Object.keys(job.requirements_json).length === 0 || !job.requirements_json.required_skills) {
         try {
-          const reqs = await extractJobRequirements(job.description);
+          const deterministicReqs = parseJobRequirementsDeterministic(job.description);
+          const reqs = deterministicReqs.confident
+            ? deterministicReqs.data
+            : await extractJobRequirements(job.description);
           updatePayload.requirements_json = reqs;
           needsUpdate = true;
         } catch (reqErr) {
