@@ -15,6 +15,11 @@ export function generateMockEmbedding(dimension = 768): number[] {
 /**
  * Generates an embedding vector for the provided text using Gemini
  */
+// Must match the `vector(768)` column size in supabase/migrations/01_initial_schema.sql
+// (also required for pgvector's HNSW index, which caps out at 2000 dimensions —
+// the gemini-embedding models default to 3072 dims unless truncated here).
+const EMBEDDING_DIMENSIONS = 768;
+
 export async function generateEmbedding(text: string): Promise<number[]> {
   const ai = getGeminiClient();
 
@@ -27,6 +32,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       response = await ai.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: textToEmbed,
+        config: { outputDimensionality: EMBEDDING_DIMENSIONS },
       }) as any;
     } catch (previewErr) {
       // NOTE: text-embedding-004 was shut down by Google — do not revert to it.
@@ -34,6 +40,7 @@ export async function generateEmbedding(text: string): Promise<number[]> {
       response = await ai.models.embedContent({
         model: "gemini-embedding-001",
         contents: textToEmbed,
+        config: { outputDimensionality: EMBEDDING_DIMENSIONS },
       }) as any;
     }
     if (response) {
