@@ -61,7 +61,7 @@ app.get("/api/auth/status", (req, res) => {
   });
 });
 
-// Resume parser route (pdf-parse + Gemini extraction)
+// Resume parser route (unpdf + Gemini extraction)
 app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => {
   try {
     if (!req.file) {
@@ -74,26 +74,22 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
                   (req.file.originalname && req.file.originalname.toLowerCase().endsWith(".pdf"));
 
     if (isPdf) {
-      // Loaded lazily (not at module top-level): pdf-parse pulls in pdfjs-dist,
-      // which references browser globals (DOMMatrix) at import time and can
-      // throw in serverless runtimes lacking its native canvas polyfill. A
-      // top-level import would crash the whole function on cold start; a
-      // dynamic import here only fails this one request.
-      let PDFParse: typeof import("pdf-parse").PDFParse;
+      // Loaded lazily (not at module top-level) so a failure to load this
+      // dependency only fails this one request instead of crashing the whole
+      // serverless function on cold start. unpdf ships a serverless-safe
+      // PDF.js build with no native/canvas dependency for plain text extraction.
+      let getDocumentProxy: typeof import("unpdf").getDocumentProxy;
+      let extractText: typeof import("unpdf").extractText;
       try {
-        ({ PDFParse } = await import("pdf-parse"));
+        ({ getDocumentProxy, extractText } = await import("unpdf"));
       } catch (loadErr: any) {
-        console.error("Failed to load pdf-parse module:", loadErr);
+        console.error("Failed to load unpdf module:", loadErr);
         return res.status(503).json({ error: "PDF parsing is temporarily unavailable. Try uploading a .txt/.docx version, or contact support." });
       }
 
-      const parser = new PDFParse({ data: req.file.buffer });
-      try {
-        const parsedData = await parser.getText();
-        rawText = parsedData.text || "";
-      } finally {
-        await parser.destroy();
-      }
+      const pdfDoc = await getDocumentProxy(new Uint8Array(req.file.buffer));
+      const { text } = await extractText(pdfDoc, { mergePages: true });
+      rawText = text || "";
     } else {
       rawText = req.file.buffer.toString("utf-8");
     }
