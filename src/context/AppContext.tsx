@@ -354,19 +354,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Save login details (profile) to the database immediately!
-    try {
-      await apiFetch("/api/profile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: loggedUser.id,
-          email: loggedUser.email,
-          name: loggedUser.name,
-          preferred_country: "us"
-        })
-      });
-    } catch (err) {
-      console.error("Failed to save login profile to database:", err);
+    const profileRes = await apiFetch("/api/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: loggedUser.id,
+        email: loggedUser.email,
+        name: loggedUser.name,
+        preferred_country: "us"
+      })
+    });
+    if (!profileRes.ok) {
+      const err = await profileRes.json().catch(() => ({}));
+      throw new Error(err.error || "Failed to save profile to database");
     }
 
     localStorage.setItem("jobradar_user", JSON.stringify(loggedUser));
@@ -397,6 +397,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         accessTokenRef.current = data.session?.access_token || null;
 
+        // Supabase created the auth.users row, but if email confirmation is
+        // required there's no session yet — the server can't authenticate any
+        // follow-up requests (like creating the profile row) until the user
+        // confirms their email and actually signs in. Stop here and tell them,
+        // rather than silently proceeding with an unauthenticated user.
+        if (data.user && !data.session) {
+          throw new Error(
+            "Account created! Check your email to confirm your address, then sign in."
+          );
+        }
+
         if (data.user) {
           loggedUser = {
             id: data.user.id,
@@ -419,19 +430,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Save login details (profile) to the database immediately!
-    try {
-      await apiFetch("/api/profile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: loggedUser.id,
-          email: loggedUser.email,
-          name: loggedUser.name,
-          preferred_country: "us"
-        })
-      });
-    } catch (err) {
-      console.error("Failed to save signup profile to database:", err);
+    const profileRes = await apiFetch("/api/profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: loggedUser.id,
+        email: loggedUser.email,
+        name: loggedUser.name,
+        preferred_country: "us"
+      })
+    });
+    if (!profileRes.ok) {
+      const err = await profileRes.json().catch(() => ({}));
+      throw new Error(err.error || "Failed to save profile to database");
     }
 
     localStorage.setItem("jobradar_user", JSON.stringify(loggedUser));
