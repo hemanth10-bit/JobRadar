@@ -1,7 +1,32 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ApiError } from "@google/genai";
 import { ParsedResume } from "../types.js";
 
 let aiInstance: GoogleGenAI | null = null;
+
+// Gemini occasionally returns transient errors (503 "model overloaded",
+// 429 rate limits) under normal load. Retry those with backoff instead of
+// failing the whole request on a blip; anything else (bad request, auth,
+// etc.) fails immediately since retrying won't help.
+const RETRYABLE_STATUS_CODES = new Set([429, 503]);
+
+export async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const isRetryable = err instanceof ApiError && RETRYABLE_STATUS_CODES.has(err.status);
+      if (!isRetryable || attempt === maxRetries) {
+        throw err;
+      }
+      const delayMs = 500 * 2 ** attempt + Math.random() * 250;
+      console.warn(`Gemini call failed with a transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delayMs)}ms:`, (err as Error).message);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}
 
 export function getGeminiClient(): GoogleGenAI {
   if (!aiInstance) {
@@ -34,7 +59,7 @@ Resume Text:
 ${text}
 """`;
 
-  const response = await ai.models.generateContent({
+  const response = await withGeminiRetry(() => ai.models.generateContent({
     model: "gemini-3.5-flash",
     contents: prompt,
     config: {
@@ -71,7 +96,7 @@ ${text}
         required: ["skills", "titles", "years_experience", "education", "tools"]
       }
     }
-  });
+  }));
 
   const rawText = response.text || "{}";
   return JSON.parse(cleanJsonResponse(rawText));
@@ -96,7 +121,7 @@ Job Description:
 ${description}
 """`;
 
-  const response = await ai.models.generateContent({
+  const response = await withGeminiRetry(() => ai.models.generateContent({
     model: "gemini-3.5-flash",
     contents: prompt,
     config: {
@@ -127,7 +152,7 @@ ${description}
         required: ["required_skills", "experience_years_needed", "seniority", "must_haves"]
       }
     }
-  });
+  }));
 
   const rawText = response.text || "{}";
   return JSON.parse(cleanJsonResponse(rawText));
@@ -166,11 +191,11 @@ Job Description:
 ${jobDescription}
 """`;
 
-  const response = await ai.models.generateContent({
+  const response = await withGeminiRetry(() => ai.models.generateContent({
     model: "gemini-3.5-flash",
     contents: prompt,
     config: {
-      systemInstruction: `Evaluate strictly. Be realistic: 
+      systemInstruction: `Evaluate strictly. Be realistic:
       - experience_match: Compare resume years_experience vs job requirements.
       - skills_match: Evaluate matching skills/tools vs required skills.
       - responsibilities_match: Compare targeted roles/titles vs job title/role functions.
@@ -207,7 +232,7 @@ ${jobDescription}
         required: ["match_score", "score_breakdown", "gap_analysis", "resume_suggestions"]
       }
     }
-  });
+  }));
 
   const rawText = response.text || "{}";
   return JSON.parse(cleanJsonResponse(rawText));

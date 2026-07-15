@@ -1,4 +1,4 @@
-import { getGeminiClient } from "./ai.js";
+import { getGeminiClient, withGeminiRetry } from "./ai.js";
 
 /**
  * Generates a deterministic mock embedding vector when the API is unavailable
@@ -29,19 +29,19 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   try {
     let response: any;
     try {
-      response = await ai.models.embedContent({
+      response = await withGeminiRetry(() => ai.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: textToEmbed,
         config: { outputDimensionality: EMBEDDING_DIMENSIONS },
-      }) as any;
+      })) as any;
     } catch (previewErr) {
       // NOTE: text-embedding-004 was shut down by Google — do not revert to it.
       console.warn("gemini-embedding-2-preview failed, trying gemini-embedding-001 fallback...", previewErr);
-      response = await ai.models.embedContent({
+      response = await withGeminiRetry(() => ai.models.embedContent({
         model: "gemini-embedding-001",
         contents: textToEmbed,
         config: { outputDimensionality: EMBEDDING_DIMENSIONS },
-      }) as any;
+      })) as any;
     }
     if (response) {
       if (response.embedding && response.embedding.values) {
