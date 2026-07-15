@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import multer from "multer";
-import { PDFParse } from "pdf-parse";
 import dotenv from "dotenv";
 
 // Load environment variables
@@ -75,6 +74,19 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
                   (req.file.originalname && req.file.originalname.toLowerCase().endsWith(".pdf"));
 
     if (isPdf) {
+      // Loaded lazily (not at module top-level): pdf-parse pulls in pdfjs-dist,
+      // which references browser globals (DOMMatrix) at import time and can
+      // throw in serverless runtimes lacking its native canvas polyfill. A
+      // top-level import would crash the whole function on cold start; a
+      // dynamic import here only fails this one request.
+      let PDFParse: typeof import("pdf-parse").PDFParse;
+      try {
+        ({ PDFParse } = await import("pdf-parse"));
+      } catch (loadErr: any) {
+        console.error("Failed to load pdf-parse module:", loadErr);
+        return res.status(503).json({ error: "PDF parsing is temporarily unavailable. Try uploading a .txt/.docx version, or contact support." });
+      }
+
       const parser = new PDFParse({ data: req.file.buffer });
       try {
         const parsedData = await parser.getText();
