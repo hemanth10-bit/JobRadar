@@ -320,7 +320,7 @@ function MainDashboard() {
                   <select
                     id="country-selector"
                     disabled={!currentSelectedResume || isPipelineRunning}
-                    value={profile?.preferred_country || "us"}
+                    value={profile?.preferred_country || "in"}
                     onChange={(e) => updateCountry(e.target.value)}
                     className="w-full bg-zinc-950 border border-white/10 focus:border-white/30 rounded-xl py-3 px-4 text-sm text-zinc-200 outline-none transition-colors appearance-none cursor-pointer disabled:opacity-50"
                   >
@@ -331,7 +331,7 @@ function MainDashboard() {
                 </div>
               </div>
               <p className="text-[10px] text-zinc-500 leading-normal font-mono">
-                Changing your country targets will trigger a fresh daily search matching loop in that specific geographic region immediately.
+                Search jobs from this location using the button below once you're ready.
               </p>
             </div>
 
@@ -349,7 +349,7 @@ function MainDashboard() {
               ) : (
                 <button
                   id="manual-refresh-btn"
-                  onClick={() => triggerManualRefresh(profile?.preferred_country || "us")}
+                  onClick={() => triggerManualRefresh(profile?.preferred_country || "in")}
                   disabled={isPipelineRunning}
                   className="w-full bg-white text-zinc-950 py-4 px-4 rounded-2xl text-xs font-bold tracking-tight cursor-pointer hover:bg-zinc-200 transition-all flex items-center justify-center gap-2 disabled:opacity-60"
                 >

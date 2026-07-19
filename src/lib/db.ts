@@ -95,7 +95,7 @@ export const DbService = {
         name: profile.name || profile.email.split("@")[0],
         email: profile.email,
         target_roles: profile.target_roles || [],
-        preferred_country: profile.preferred_country || "us",
+        preferred_country: profile.preferred_country || "in",
         min_match_score: profile.min_match_score || 50,
         created_at: existingIdx >= 0 ? localDB.profiles[existingIdx].created_at : new Date().toISOString()
       };

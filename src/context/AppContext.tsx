@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from "react";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { Profile, Resume, JobMatch, ApplicationHistory, ParsedResume, COUNTRIES } from "../types.js";
+import { detectPreferredCountry } from "../lib/geolocation.js";
 
 interface AuthStatus {
   supabaseConfigured: boolean;
@@ -124,7 +125,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     user_id: googleUser.id,
                     email: googleUser.email,
                     name: googleUser.name,
-                    preferred_country: "us"
+                    preferred_country: "in"
                   })
                 });
               } catch (pErr) {
@@ -164,7 +165,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                       user_id: googleUser.id,
                       email: googleUser.email,
                       name: googleUser.name,
-                      preferred_country: "us"
+                      preferred_country: "in"
                     })
                   });
                 } catch (pErr) {
@@ -242,7 +243,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         if (!profData) {
-          // Create initial profile
+          // Create initial profile — first time we're seeing this user, so
+          // this is the moment to ask for geolocation permission.
           const upsertRes = await apiFetch("/api/profile", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -250,7 +252,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               user_id: user.id,
               email: user.email,
               name: user.name,
-              preferred_country: "us"
+              preferred_country: await detectPreferredCountry()
             })
           });
           if (upsertRes.ok) {
@@ -353,6 +355,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
+    // Only detect location for genuinely new profiles — an existing user's
+    // saved preference should never be silently overwritten on every login.
+    const existingProfileRes = await apiFetch(`/api/profile/${loggedUser.id}`);
+    const existingProfile = existingProfileRes.ok ? await existingProfileRes.json() : null;
+    const preferredCountry = existingProfile?.preferred_country || await detectPreferredCountry();
+
     // Save login details (profile) to the database immediately!
     const profileRes = await apiFetch("/api/profile", {
       method: "POST",
@@ -361,7 +369,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         user_id: loggedUser.id,
         email: loggedUser.email,
         name: loggedUser.name,
-        preferred_country: "us"
+        preferred_country: preferredCountry
       })
     });
     if (!profileRes.ok) {
@@ -429,7 +437,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    // Save login details (profile) to the database immediately!
+    // Save signup details (profile) to the database immediately — always a
+    // new profile, so detect location fresh.
     const profileRes = await apiFetch("/api/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -437,7 +446,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         user_id: loggedUser.id,
         email: loggedUser.email,
         name: loggedUser.name,
-        preferred_country: "us"
+        preferred_country: await detectPreferredCountry()
       })
     });
     if (!profileRes.ok) {
@@ -506,7 +515,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       if (!res.ok) {
-        throw new Error("Failed to save and analyze resume");
+        throw new Error("Failed to save resume");
       }
 
       const data = await res.json();
@@ -566,15 +575,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const updatedProfile = { ...profile, preferred_country: country };
     setProfile(updatedProfile);
 
-    // Save to server
+    // Just saves the preference — searching is a separate, explicit action
+    // via the "Search For New Jobs" button.
     await apiFetch("/api/profile", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updatedProfile)
     });
-
-    // Auto-trigger refresh for the new country
-    await triggerManualRefresh(country);
   };
 
   // Mark job applied / saved / viewed etc.
@@ -634,7 +641,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       if (!res.ok) {
-        throw new Error("Failed to update resume and re-analyze");
+        throw new Error("Failed to update resume");
       }
 
       const data = await res.json();

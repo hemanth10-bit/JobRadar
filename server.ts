@@ -116,7 +116,9 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
   }
 });
 
-// Confirm resume route (generate embedding + trigger pipeline)
+// Confirm resume route (save only — job search is a separate, explicit action
+// via /api/pipeline/search-match, which lazily generates the embedding itself
+// if one isn't cached yet)
 app.post("/api/resume/confirm", asyncHandler(async (req, res) => {
   const { parsedResume, rawFileUrl } = req.body;
   if (!parsedResume) {
@@ -125,14 +127,6 @@ app.post("/api/resume/confirm", asyncHandler(async (req, res) => {
   const userId = await resolveUserId(req, req.body.userId);
 
   try {
-    let embedding: number[] | undefined;
-    try {
-      const textToEmbed = `${parsedResume.titles.join(", ")} ${parsedResume.skills.join(", ")} ${parsedResume.tools.join(", ")}`;
-      embedding = await generateEmbedding(textToEmbed);
-    } catch (embErr) {
-      console.warn("Failed to generate resume embedding, continuing with mock.", embErr);
-    }
-
     const activeResume = await DbService.getActiveResume(userId);
     const nextVersion = activeResume ? activeResume.version + 1 : 1;
 
@@ -141,14 +135,8 @@ app.post("/api/resume/confirm", asyncHandler(async (req, res) => {
       raw_file_url: rawFileUrl || "uploaded_file.pdf",
       parsed_json: parsedResume,
       version: nextVersion,
-      is_active: true,
-      embedding
+      is_active: true
     });
-
-    const profile = await DbService.getProfile(userId);
-    const country = profile?.preferred_country || "us";
-
-    await runJobMatchingPipelineForUser(userId, parsedResume, embedding || [], country, nextVersion);
 
     res.json({ success: true, resume: savedResume });
   } catch (err: any) {
@@ -184,35 +172,21 @@ app.post("/api/resume/activate", asyncHandler(async (req, res) => {
 }));
 
 // Update an existing resume's parsed details
+// Save-only — skills changed, so the cached embedding is cleared and will be
+// regenerated fresh the next time the user explicitly searches (see
+// /api/pipeline/search-match's lazy embedding generation).
 app.post("/api/resume/update", asyncHandler(async (req, res) => {
   const { resumeId, parsedResume } = req.body;
   if (!resumeId || !parsedResume) {
     return res.status(400).json({ error: "Missing required fields" });
   }
-  const userId = await resolveUserId(req, req.body.userId);
+  await resolveUserId(req, req.body.userId);
 
   try {
-    let embedding: number[] | undefined;
-    try {
-      const textToEmbed = `${parsedResume.titles.join(", ")} ${parsedResume.skills.join(", ")} ${parsedResume.tools.join(", ")}`;
-      embedding = await generateEmbedding(textToEmbed);
-    } catch (embErr) {
-      console.warn("Failed to generate resume embedding, continuing with mock.", embErr);
-    }
-
-    const updatePayload: any = {
-      parsed_json: parsedResume
-    };
-    if (embedding) {
-      updatePayload.embedding = embedding;
-    }
-
-    const updatedResume = await DbService.updateResumeFields(resumeId, updatePayload);
-
-    const profile = await DbService.getProfile(userId);
-    const country = profile?.preferred_country || "us";
-
-    await runJobMatchingPipelineForUser(userId, parsedResume, embedding || [], country, updatedResume.version);
+    const updatedResume = await DbService.updateResumeFields(resumeId, {
+      parsed_json: parsedResume,
+      embedding: null as any
+    });
 
     res.json({ success: true, resume: updatedResume });
   } catch (err: any) {
@@ -249,7 +223,7 @@ app.post("/api/pipeline/search-match", asyncHandler(async (req, res) => {
     await DbService.upsertProfile({
       user_id: userId,
       email: req.body.email || "user@example.com",
-      preferred_country: country || "us"
+      preferred_country: country || "in"
     });
 
     let resumeEmbedding = (activeResume as any).embedding;
@@ -259,7 +233,7 @@ app.post("/api/pipeline/search-match", asyncHandler(async (req, res) => {
       await DbService.updateJobFields(activeResume.id, { embedding: resumeEmbedding });
     }
 
-    const targetCountry = country || "us";
+    const targetCountry = country || "in";
     await runJobMatchingPipelineForUser(userId, activeResume.parsed_json, resumeEmbedding, targetCountry, activeResume.version);
 
     const matches = await DbService.getJobMatches(userId);
@@ -373,7 +347,7 @@ app.post("/api/cron/daily", checkCronSecret, async (req, res) => {
             profile.user_id,
             activeResume.parsed_json,
             resumeEmbedding,
-            profile.preferred_country || "us",
+            profile.preferred_country || "in",
             activeResume.version
           );
         }

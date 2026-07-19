@@ -119,9 +119,9 @@ export const ParsedReviewModal: React.FC = () => {
         {/* Content Body */}
         <div className="flex-grow p-6 overflow-y-auto space-y-6">
           <p className="text-sm text-zinc-400 leading-relaxed">
-            {editingResumeId 
-              ? "Modify the professional dimensions of your active resume. Saving changes will automatically re-analyze the job market."
-              : "We used AI to extract core professional dimensions from your resume. Please review the categories below and make corrections as needed before scanning the job market."
+            {editingResumeId
+              ? "Modify the professional dimensions of your active resume. You can search for new matches afterward from the dashboard."
+              : "We extracted core professional dimensions from your resume. Please review the categories below and make corrections as needed, then search for jobs from the dashboard."
             }
           </p>
 
@@ -290,12 +290,12 @@ export const ParsedReviewModal: React.FC = () => {
             {isPipelineRunning ? (
               <>
                 <div className="w-4 h-4 border-2 border-zinc-400 border-t-zinc-950 rounded-full animate-spin" />
-                <span>{editingResumeId ? "Saving & Scoring..." : "Running Match Pipeline..."}</span>
+                <span>Saving...</span>
               </>
             ) : (
               <>
                 <CheckCircle className="w-4 h-4" />
-                <span>{editingResumeId ? "Save & Re-score Jobs" : "Confirm & Search Jobs"}</span>
+                <span>{editingResumeId ? "Save Resume" : "Confirm Resume"}</span>
               </>
             )}
           </button>
