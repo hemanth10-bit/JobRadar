@@ -86,12 +86,15 @@ function MainDashboard() {
     }
   };
 
-  // Filter out dismissed matches and only show matches corresponding to the selected resume version
-  const activeMatches = matches.filter(m => 
-    m.status !== "dismissed" && 
+  // Filter out dismissed matches and only show matches corresponding to the selected resume version.
+  // Matches already come back sorted by llm_score descending, so capping at
+  // 10 keeps the dashboard to the top matches rather than an unbounded list.
+  const MAX_DISPLAYED_MATCHES = 10;
+  const activeMatches = matches.filter(m =>
+    m.status !== "dismissed" &&
     m.status !== "applied" &&
     (!currentSelectedResume || m.resume_version === currentSelectedResume.version)
-  );
+  ).slice(0, MAX_DISPLAYED_MATCHES);
 
   return (
     <div id="dashboard-root" className="min-h-screen bg-zinc-950 text-zinc-200 font-sans flex flex-col justify-between relative overflow-hidden">

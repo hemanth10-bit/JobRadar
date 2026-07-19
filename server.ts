@@ -6,7 +6,7 @@ import dotenv from "dotenv";
 // Load environment variables
 dotenv.config();
 
-import { parseResumeText, extractJobRequirements, scoreJobMatch } from "./src/lib/ai.js";
+import { parseResumeText, scoreJobMatch } from "./src/lib/ai.js";
 import { generateEmbedding } from "./src/lib/embeddings.js";
 import { DbService, isSupabaseConfigured, localDB, getSupabaseClient } from "./src/lib/db.js";
 import { JobSourcesManager } from "./src/lib/job_sources.js";
@@ -465,11 +465,12 @@ async function runJobMatchingPipelineForUser(
 
       if (!job.requirements_json || Object.keys(job.requirements_json).length === 0 || !job.requirements_json.required_skills) {
         try {
-          const deterministicReqs = parseJobRequirementsDeterministic(job.description);
-          const reqs = deterministicReqs.confident
-            ? deterministicReqs.data
-            : await extractJobRequirements(job.description);
-          updatePayload.requirements_json = reqs;
+          // requirements_json is stored metadata only — matching (Stage 1
+          // embedding similarity, Stage 2 LLM scoring) never reads it. Never
+          // spend a Gemini call here regardless of parser confidence, so the
+          // full (very limited, free-tier) daily quota is available for
+          // scoring, which is what actually produces visible matches.
+          updatePayload.requirements_json = parseJobRequirementsDeterministic(job.description).data;
           needsUpdate = true;
         } catch (reqErr) {
           console.error(`Job requirements extraction failed for job ${job.id}:`, reqErr);

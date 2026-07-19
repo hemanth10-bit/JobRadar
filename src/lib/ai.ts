@@ -9,6 +9,15 @@ let aiInstance: GoogleGenAI | null = null;
 // etc.) fails immediately since retrying won't help.
 const RETRYABLE_STATUS_CODES = new Set([429, 503]);
 
+// A 429 whose quotaId contains "PerDay" is a daily quota exhaustion (common
+// on the free tier — as low as 20 requests/day for some models), not a
+// transient burst limit. It cannot recover within a request's lifetime, so
+// retrying just wastes time and risks hitting the function's own timeout —
+// fail fast instead.
+function isDailyQuotaExhausted(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 429 && /PerDay/i.test(err.message);
+}
+
 export async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -16,7 +25,7 @@ export async function withGeminiRetry<T>(fn: () => Promise<T>, maxRetries = 3): 
       return await fn();
     } catch (err) {
       lastErr = err;
-      const isRetryable = err instanceof ApiError && RETRYABLE_STATUS_CODES.has(err.status);
+      const isRetryable = err instanceof ApiError && RETRYABLE_STATUS_CODES.has(err.status) && !isDailyQuotaExhausted(err);
       if (!isRetryable || attempt === maxRetries) {
         throw err;
       }
@@ -110,52 +119,6 @@ export interface JobRequirements {
   experience_years_needed: number;
   seniority: string;
   must_haves: string[];
-}
-
-export async function extractJobRequirements(description: string): Promise<JobRequirements> {
-  const ai = getGeminiClient();
-  const prompt = `Extract structured job requirements from the following job description.
-
-Job Description:
-"""
-${description}
-"""`;
-
-  const response = await withGeminiRetry(() => ai.models.generateContent({
-    model: "gemini-3.5-flash",
-    contents: prompt,
-    config: {
-      systemInstruction: "Respond with a precise analysis of requirements. For experience years needed, estimate the minimum years based on context (e.g., Senior = 5, Mid = 3, Junior = 1) if not explicitly mentioned. Respond ONLY with valid JSON.",
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          required_skills: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Primary skills required for this job."
-          },
-          experience_years_needed: {
-            type: Type.INTEGER,
-            description: "Minimum years of experience required or estimated."
-          },
-          seniority: {
-            type: Type.STRING,
-            description: "Seniority tier (e.g. Junior, Mid, Senior, Lead, Entry)."
-          },
-          must_haves: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Critical non-negotiable requirements mentioned in the text."
-          }
-        },
-        required: ["required_skills", "experience_years_needed", "seniority", "must_haves"]
-      }
-    }
-  }));
-
-  const rawText = response.text || "{}";
-  return JSON.parse(cleanJsonResponse(rawText));
 }
 
 /**
