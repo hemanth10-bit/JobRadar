@@ -110,9 +110,26 @@ export const DbService = {
     }
 
     const supabase = getSupabaseClient();
+
+    // `name` is NOT NULL with no DB default. Some callers (e.g. the
+    // pipeline's own profile touch-up) don't have a real name to pass — only
+    // fill a fallback for brand-new profiles, so we never clobber an
+    // existing user's real name with an email-derived guess on a later call.
+    let payload: typeof profile = profile;
+    if (!profile.name) {
+      const { data: existing } = await supabase
+        .from("profiles")
+        .select("name")
+        .eq("user_id", profile.user_id)
+        .maybeSingle();
+      if (!existing) {
+        payload = { ...profile, name: profile.email.split("@")[0] };
+      }
+    }
+
     const { data, error } = await supabase
       .from("profiles")
-      .upsert(profile, { onConflict: "user_id" })
+      .upsert(payload, { onConflict: "user_id" })
       .select()
       .single();
 
