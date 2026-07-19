@@ -19,6 +19,7 @@ export interface Profile {
   preferred_country: string;
   min_match_score: number;
   created_at: string;
+  last_search_triggered_at?: string;
 }
 
 export interface ParsedResume {

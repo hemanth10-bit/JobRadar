@@ -195,6 +195,10 @@ app.post("/api/resume/update", asyncHandler(async (req, res) => {
   }
 }));
 
+// Rate-limits how often one user can trigger a pipeline run, to keep the
+// (expensive, Gemini-heavy) pipeline from being spammed by rapid clicks or scripts.
+const SEARCH_COOLDOWN_MS = 30 * 1000;
+
 // Trigger matching pipeline manually
 app.post("/api/pipeline/search-match", asyncHandler(async (req, res) => {
   const { country } = req.body;
@@ -220,11 +224,26 @@ app.post("/api/pipeline/search-match", asyncHandler(async (req, res) => {
       return res.status(400).json({ error: "No active resume found for user. Please upload a resume first." });
     }
 
+    // The daily cron is a legitimate scheduled system action, not user-triggered
+    // spam, so it bypasses the cooldown check.
+    if (!isTrustedCronCall) {
+      const existingProfile = await DbService.getProfile(userId);
+      const lastTriggered = existingProfile?.last_search_triggered_at
+        ? new Date(existingProfile.last_search_triggered_at).getTime()
+        : 0;
+      const msSinceLastTrigger = Date.now() - lastTriggered;
+      if (msSinceLastTrigger < SEARCH_COOLDOWN_MS) {
+        const waitSeconds = Math.ceil((SEARCH_COOLDOWN_MS - msSinceLastTrigger) / 1000);
+        return res.status(429).json({ error: `Please wait ${waitSeconds}s before searching again.` });
+      }
+    }
+
     await DbService.upsertProfile({
       user_id: userId,
       email: req.body.email || "user@example.com",
       preferred_country: country || "in"
     });
+    await DbService.touchProfileLastSearch(userId);
 
     let resumeEmbedding = (activeResume as any).embedding;
     if (!resumeEmbedding || resumeEmbedding.length === 0) {
@@ -363,6 +382,24 @@ app.post("/api/cron/daily", checkCronSecret, async (req, res) => {
   }
 });
 
+// Runs `fn` over `items` with at most `limit` in flight at once. Used to
+// parallelize the pipeline's Gemini-heavy loops without hammering the API's
+// rate limits harder than a handful of concurrent requests already do.
+async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await fn(items[currentIndex]);
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // ==========================================
 // CENTRAL JOB MATCHING PIPELINE WORKFLOW
 // ==========================================
@@ -404,7 +441,7 @@ async function runJobMatchingPipelineForUser(
   const savedJobs = await DbService.upsertJobs(uniqueJobs);
   console.log(`Ingested ${savedJobs.length} unique jobs into the database.`);
 
-  for (const job of savedJobs) {
+  await mapWithConcurrency(savedJobs, 4, async (job) => {
     try {
       let needsUpdate = false;
       const updatePayload: any = {};
@@ -441,36 +478,47 @@ async function runJobMatchingPipelineForUser(
     } catch (itemErr) {
       console.error(`Error caching metadata/embedding for job ${job.id}:`, itemErr);
     }
-  }
+  });
 
   const shortlistedJobs = await DbService.queryTopJobsForEmbedding(resumeEmbedding, country, 15);
   console.log(`Stage 1 shortlist filtered down to ${shortlistedJobs.length} jobs.`);
 
-  for (const matchJob of shortlistedJobs) {
+  // Filter out jobs already scored for this resume version (cheap DB reads,
+  // parallelized) before deciding what actually needs an LLM call.
+  const alreadyScored = await mapWithConcurrency(shortlistedJobs, 4, async (matchJob) => {
+    let matches = [];
+    if (isSupabaseConfigured()) {
+      const supabase = getSupabaseClient();
+      const { data } = await supabase
+        .from("job_matches")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("job_id", matchJob.id)
+        .eq("resume_version", resumeVersion);
+      matches = data || [];
+    } else {
+      matches = localDB.jobMatches.filter(m =>
+        m.user_id === userId &&
+        m.job_id === matchJob.id &&
+        m.resume_version === resumeVersion
+      );
+    }
+    return matches.length > 0 && matches[0].llm_score !== null;
+  });
+
+  const unscoredJobs = shortlistedJobs.filter((_, idx) => !alreadyScored[idx]);
+
+  // Cap how many jobs get freshly scored in a single run so one request has
+  // a predictable worst-case duration; the rest get picked up on the next
+  // explicit search or the daily cron.
+  const SCORING_CAP_PER_RUN = 8;
+  const jobsToScore = unscoredJobs.slice(0, SCORING_CAP_PER_RUN);
+  if (unscoredJobs.length > jobsToScore.length) {
+    console.log(`Deferring ${unscoredJobs.length - jobsToScore.length} unscored jobs to a future run.`);
+  }
+
+  await mapWithConcurrency(jobsToScore, 4, async (matchJob) => {
     try {
-      let matches = [];
-      if (isSupabaseConfigured()) {
-        const supabase = getSupabaseClient();
-        const { data } = await supabase
-          .from("job_matches")
-          .select("*")
-          .eq("user_id", userId)
-          .eq("job_id", matchJob.id)
-          .eq("resume_version", resumeVersion);
-        matches = data || [];
-      } else {
-        matches = localDB.jobMatches.filter(m =>
-          m.user_id === userId &&
-          m.job_id === matchJob.id &&
-          m.resume_version === resumeVersion
-        );
-      }
-
-      if (matches.length > 0 && matches[0].llm_score !== null) {
-        console.log(`Match score already cached for job ${matchJob.id}. Skipping re-scoring.`);
-        continue;
-      }
-
       console.log(`Invoking Stage 2 LLM scoring for job: ${matchJob.title} at ${matchJob.company}`);
       const scoreResult = await scoreJobMatch(parsedResume, matchJob.title, matchJob.description);
 
@@ -488,7 +536,7 @@ async function runJobMatchingPipelineForUser(
     } catch (scoreErr) {
       console.error(`Failed to score match for job ${matchJob.id}:`, scoreErr);
     }
-  }
+  });
 }
 
 // ==========================================

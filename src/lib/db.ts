@@ -97,7 +97,8 @@ export const DbService = {
         target_roles: profile.target_roles || [],
         preferred_country: profile.preferred_country || "in",
         min_match_score: profile.min_match_score || 50,
-        created_at: existingIdx >= 0 ? localDB.profiles[existingIdx].created_at : new Date().toISOString()
+        created_at: existingIdx >= 0 ? localDB.profiles[existingIdx].created_at : new Date().toISOString(),
+        last_search_triggered_at: existingIdx >= 0 ? localDB.profiles[existingIdx].last_search_triggered_at : undefined
       };
 
       if (existingIdx >= 0) {
@@ -117,6 +118,26 @@ export const DbService = {
 
     if (error) throw error;
     return data as Profile;
+  },
+
+  // Used to rate-limit /api/pipeline/search-match triggers.
+  async touchProfileLastSearch(userId: string): Promise<void> {
+    const now = new Date().toISOString();
+
+    if (!isSupabaseConfigured()) {
+      const profile = localDB.profiles.find(p => p.user_id === userId);
+      if (profile) {
+        profile.last_search_triggered_at = now;
+      }
+      return;
+    }
+
+    const supabase = getSupabaseClient();
+    const { error } = await supabase
+      .from("profiles")
+      .update({ last_search_triggered_at: now })
+      .eq("user_id", userId);
+    if (error) throw error;
   },
 
   // RESUMES
