@@ -272,7 +272,7 @@ export const DbService = {
   async getJobsByCountry(country: string): Promise<Job[]> {
     if (!isSupabaseConfigured()) {
       if (country === "all") return localDB.jobs;
-      return localDB.jobs.filter(j => j.country === country);
+      return localDB.jobs.filter(j => j.country === country || j.country === "all");
     }
 
     const supabase = getSupabaseClient();
@@ -365,7 +365,12 @@ export const DbService = {
   // MATCH JOBS (COSIM PIPELINE)
   async queryTopJobsForEmbedding(embedding: number[], country: string, limit = 15): Promise<(Job & { similarity: number })[]> {
     if (!isSupabaseConfigured()) {
-      const filteredJobs = country === "all" ? localDB.jobs : localDB.jobs.filter(j => j.country === country);
+      // Remote jobs (country === "all") are always included alongside
+      // country-specific ones — see supabase/migrations/03_include_remote_jobs_in_match.sql
+      // for the equivalent fix on the Supabase-backed path.
+      const filteredJobs = country === "all"
+        ? localDB.jobs
+        : localDB.jobs.filter(j => j.country === country || j.country === "all");
 
       const scored = filteredJobs.map(job => {
         // Retrieve embedding if we saved it locally

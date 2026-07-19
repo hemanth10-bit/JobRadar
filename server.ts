@@ -413,7 +413,12 @@ async function runJobMatchingPipelineForUser(
   console.log(`Running pipeline for user: ${userId} (${country})`);
 
   const manager = new JobSourcesManager();
-  const searchQueries = parsedResume.titles.length > 0 ? parsedResume.titles.slice(0, 2) : ["Software Engineer"];
+  // Titles alone can be too narrow for keyword-matching job boards (Adzuna's
+  // `what` param requires all terms to appear) — broadening with top skills
+  // catches jobs a title-only search would miss.
+  const titleQueries = parsedResume.titles.length > 0 ? parsedResume.titles.slice(0, 2) : ["Software Engineer"];
+  const skillQueries = (parsedResume.skills || []).slice(0, 2);
+  const searchQueries = Array.from(new Set([...titleQueries, ...skillQueries]));
 
   const fetchedJobsList = [];
   for (const q of searchQueries) {

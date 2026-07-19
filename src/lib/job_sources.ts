@@ -245,6 +245,62 @@ function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, " ");
 }
 
+// ==========================================
+// 4. ARBEITNOW ADAPTER (Free EU/remote jobs, no key)
+// ==========================================
+// Concentrated on the German-speaking market (Germany, Austria, Switzerland)
+// plus remote-friendly roles. No API key, no documented server-side keyword
+// search, so — like Remotive — we fetch a page and filter client-side.
+export class ArbeitnowAdapter implements JobSourceAdapter {
+  name = "arbeitnow";
+  enabled = true;
+
+  async fetchJobs(query: string, country: string, page: number): Promise<IngestedJobInput[]> {
+    const url = `https://www.arbeitnow.com/api/job-board-api?page=${page}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Arbeitnow API error: ${response.statusText}`);
+      }
+      const data = await response.json();
+      if (!data.data) return [];
+
+      let jobs = data.data;
+
+      // Filter by query loosely if provided
+      if (query) {
+        const q = query.toLowerCase();
+        jobs = jobs.filter((j: any) =>
+          (j.title || "").toLowerCase().includes(q) ||
+          (j.description || "").toLowerCase().includes(q) ||
+          (j.tags || []).some((tag: string) => tag.toLowerCase().includes(q))
+        );
+      }
+
+      return jobs.map((job: any) => ({
+        external_job_id: job.slug,
+        source_id: this.name,
+        title: job.title || "Job Title",
+        company: job.company_name || "Confidential",
+        location: job.location || (job.remote ? "Remote" : "Germany"),
+        // Honest about what the data actually says: remote listings are
+        // tagged "all" (matches every country search, per the remote-jobs
+        // fix); everything else is concentrated on the German market.
+        country: job.remote ? "all" : "de",
+        description: stripHtml(job.description || ""),
+        apply_url: job.url || "",
+        posted_date: job.created_at
+          ? new Date(job.created_at * 1000).toISOString()
+          : new Date().toISOString()
+      }));
+    } catch (err) {
+      console.warn("Failed to fetch from Arbeitnow, returning fallbacks.", err);
+      return getFallbackJobs(country, query);
+    }
+  }
+}
+
 // Helper to construct mock fallbacks dynamically
 function getFallbackJobs(country: string, query: string): IngestedJobInput[] {
   const code = country.toLowerCase();
@@ -266,7 +322,8 @@ export class JobSourcesManager {
     this.adapters = [
       new AdzunaAdapter(),
       new JSearchAdapter(),
-      new RemotiveAdapter()
+      new RemotiveAdapter(),
+      new ArbeitnowAdapter()
     ];
   }
 
