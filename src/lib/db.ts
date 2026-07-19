@@ -111,30 +111,31 @@ export const DbService = {
 
     const supabase = getSupabaseClient();
 
-    // `name` is NOT NULL with no DB default. Some callers (e.g. the
-    // pipeline's own profile touch-up) don't have a real name to pass — only
-    // fill a fallback for brand-new profiles, so we never clobber an
-    // existing user's real name with an email-derived guess on a later call.
-    let payload: typeof profile = profile;
-    if (!profile.name) {
-      const { data: existing } = await supabase
-        .from("profiles")
-        .select("name")
-        .eq("user_id", profile.user_id)
-        .maybeSingle();
-      if (!existing) {
-        payload = { ...profile, name: profile.email.split("@")[0] };
-      }
-    }
-
-    const { data, error } = await supabase
+    // Deliberately NOT using .upsert() here: Postgres's `INSERT ... ON
+    // CONFLICT DO UPDATE` validates NOT NULL constraints against the full
+    // candidate INSERT row *before* it even checks for a conflict — so a
+    // partial payload missing a NOT NULL column (like `name`, which several
+    // callers here don't have a value for) fails even when the row already
+    // exists and the operation would've been a harmless partial update.
+    // A plain UPDATE only touches the columns provided, with no such
+    // full-row validation, so try that first and only INSERT (filling in
+    // required fields) when no row exists yet.
+    const { data: updated, error: updateError } = await supabase
       .from("profiles")
-      .upsert(payload, { onConflict: "user_id" })
+      .update(profile)
+      .eq("user_id", profile.user_id)
+      .select()
+      .maybeSingle();
+    if (updateError) throw updateError;
+    if (updated) return updated as Profile;
+
+    const { data: inserted, error: insertError } = await supabase
+      .from("profiles")
+      .insert({ ...profile, name: profile.name || profile.email.split("@")[0] })
       .select()
       .single();
-
-    if (error) throw error;
-    return data as Profile;
+    if (insertError) throw insertError;
+    return inserted as Profile;
   },
 
   // Used to rate-limit /api/pipeline/search-match triggers.
