@@ -442,7 +442,7 @@ function MainDashboard() {
                   <div className="space-y-4">
                     <div className="flex items-center justify-between text-xs text-zinc-400 px-1">
                       <span className="font-bold uppercase tracking-wider">Shortlisted Matches ({activeMatches.length})</span>
-                      <span>Scored using Gemini 1.5 & 2.0</span>
+                      <span>Scored using AI</span>
                     </div>
 
                     <div className="space-y-4">
@@ -464,7 +464,7 @@ function MainDashboard() {
       {/* Footer */}
       <footer className="z-10 border-t border-white/5 bg-zinc-950 py-6 px-6 text-center text-xs text-zinc-600 mt-12">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div>© 2026 JobRadar. Powered by Google Gemini and Supabase.</div>
+          <div>© 2026 JobRadar. Powered by Groq, Gemini, and Supabase.</div>
           <div className="flex gap-4">
             <a href="#" className="hover:text-zinc-400">Help & Support</a>
             <a href="#" className="hover:text-zinc-400">Documentation</a>

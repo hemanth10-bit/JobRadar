@@ -1,6 +1,12 @@
-import { GoogleGenAI, Type, ApiError } from "@google/genai";
+import { GoogleGenAI, ApiError } from "@google/genai";
+import Groq, { APIError as GroqAPIError } from "groq-sdk";
 import { ParsedResume } from "../types.js";
 
+// ==========================================
+// GEMINI — used only for embeddings (src/lib/embeddings.ts). Groq has no
+// embedding models, so this stays on Gemini regardless of the chat/JSON
+// generation provider below.
+// ==========================================
 let aiInstance: GoogleGenAI | null = null;
 
 // Gemini occasionally returns transient errors (503 "model overloaded",
@@ -55,59 +61,79 @@ export function getGeminiClient(): GoogleGenAI {
   return aiInstance;
 }
 
+// ==========================================
+// GROQ — resume parsing and job-match scoring. Free tier gives
+// llama-3.1-8b-instant 14,400 requests/day (vs. Gemini's free-tier cap of as
+// low as 20/day for generateContent), which is what these two calls need.
+// ==========================================
+const GROQ_MODEL = "llama-3.1-8b-instant";
+let groqInstance: Groq | null = null;
+
+function getGroqClient(): Groq {
+  if (!groqInstance) {
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      throw new Error("GROQ_API_KEY is required but not configured. Set GROQ_API_KEY in your secrets/environment.");
+    }
+    groqInstance = new Groq({ apiKey });
+  }
+  return groqInstance;
+}
+
+const GROQ_RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503]);
+
+export async function withGroqRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const isRetryable = err instanceof GroqAPIError && !!err.status && GROQ_RETRYABLE_STATUS_CODES.has(err.status);
+      if (!isRetryable || attempt === maxRetries) {
+        throw err;
+      }
+      const delayMs = 500 * 2 ** attempt + Math.random() * 250;
+      console.warn(`Groq call failed with a transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delayMs)}ms:`, (err as Error).message);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 /**
- * Parses raw resume text into structured JSON using Gemini
+ * Parses raw resume text into structured JSON using Groq (llama-3.1-8b-instant).
+ * Groq's free tier only guarantees valid JSON *syntax* here (not exact schema
+ * match, unlike Gemini's responseSchema), so the shape is spelled out
+ * explicitly in the prompt and any malformed response is caught by the
+ * caller — same graceful-degradation path as any other per-job failure.
  */
 export async function parseResumeText(text: string): Promise<ParsedResume> {
-  const ai = getGeminiClient();
-  const prompt = `You are an expert resume parser and technical recruiter. 
-Analyze the following raw resume text and extract structured information.
+  const groq = getGroqClient();
 
-Resume Text:
-"""
-${text}
-"""`;
-
-  const response = await withGeminiRetry(() => ai.models.generateContent({
-    model: "gemini-3.5-flash",
-    contents: prompt,
-    config: {
-      systemInstruction: "Extract the details with strict accuracy. If some values are not found, default them to empty lists or 0 years of experience. Respond ONLY with valid JSON.",
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          skills: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Core technical and soft skills."
-          },
-          titles: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Job titles previously held or targeted."
-          },
-          years_experience: {
-            type: Type.INTEGER,
-            description: "Total years of professional work experience."
-          },
-          education: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Degrees, certifications, and educational achievements."
-          },
-          tools: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Specific tools, platforms, or technologies mastered (e.g. Git, Docker, Figma)."
-          }
-        },
-        required: ["skills", "titles", "years_experience", "education", "tools"]
+  const response = await withGroqRetry(() => groq.chat.completions.create({
+    model: GROQ_MODEL,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are an expert resume parser and technical recruiter. Extract details with strict accuracy. If a value isn't found, default to an empty list or 0 years of experience. Respond ONLY with a single JSON object matching exactly this shape, no other text:
+{
+  "skills": string[] (core technical and soft skills),
+  "titles": string[] (job titles previously held or targeted),
+  "years_experience": integer (total years of professional work experience),
+  "education": string[] (degrees, certifications, educational achievements),
+  "tools": string[] (specific tools/platforms/technologies, e.g. Git, Docker, Figma)
+}`
+      },
+      {
+        role: "user",
+        content: `Resume Text:\n"""\n${text}\n"""`
       }
-    }
+    ]
   }));
 
-  const rawText = response.text || "{}";
+  const rawText = response.choices[0]?.message?.content || "{}";
   return JSON.parse(cleanJsonResponse(rawText));
 }
 
@@ -140,64 +166,39 @@ export async function scoreJobMatch(
   jobTitle: string,
   jobDescription: string
 ): Promise<MatchScoreResult> {
-  const ai = getGeminiClient();
-  const prompt = `You are a career development engine scoring how well a resume matches a job.
-Analyze the parsed resume JSON against the job details, and calculate a realistic match rating out of 10.
-Identify gaps and construct actionable resume modifications tailored to this exact job.
+  const groq = getGroqClient();
 
-Parsed Resume:
-${JSON.stringify(resume, null, 2)}
-
-Job Title: ${jobTitle}
-Job Description:
-"""
-${jobDescription}
-"""`;
-
-  const response = await withGeminiRetry(() => ai.models.generateContent({
-    model: "gemini-3.5-flash",
-    contents: prompt,
-    config: {
-      systemInstruction: `Evaluate strictly. Be realistic:
-      - experience_match: Compare resume years_experience vs job requirements.
-      - skills_match: Evaluate matching skills/tools vs required skills.
-      - responsibilities_match: Compare targeted roles/titles vs job title/role functions.
-      Provide detailed gap_analysis and custom resume_suggestions (such as 'Add specific experience with X tool' or 'Mention impact metrics using Y skill').
-      Respond ONLY with valid JSON.`,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          match_score: {
-            type: Type.INTEGER,
-            description: "Overall weighted rating from 0 to 10. Use standard mathematical rounding or weighting."
-          },
-          score_breakdown: {
-            type: Type.OBJECT,
-            properties: {
-              experience_match: { type: Type.INTEGER, description: "Rating 0-10 based on years of experience fit" },
-              skills_match: { type: Type.INTEGER, description: "Rating 0-10 based on skill-to-requirement overlap" },
-              responsibilities_match: { type: Type.INTEGER, description: "Rating 0-10 based on role and responsibilities alignment" }
-            },
-            required: ["experience_match", "skills_match", "responsibilities_match"]
-          },
-          gap_analysis: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Missing skills, tools, or experiences that are highlighted as important in the job."
-          },
-          resume_suggestions: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: "Highly actionable, concrete modifications or updates the user should make to their resume to fit this job."
-          }
-        },
-        required: ["match_score", "score_breakdown", "gap_analysis", "resume_suggestions"]
+  const response = await withGroqRetry(() => groq.chat.completions.create({
+    model: GROQ_MODEL,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are a career development engine scoring how well a resume matches a job. Evaluate strictly and realistically:
+- experience_match: compare resume years_experience vs job requirements.
+- skills_match: evaluate matching skills/tools vs required skills.
+- responsibilities_match: compare targeted roles/titles vs job title/role functions.
+Provide detailed gap_analysis and custom resume_suggestions (e.g. "Add specific experience with X tool", "Mention impact metrics using Y skill").
+Respond ONLY with a single JSON object matching exactly this shape, no other text:
+{
+  "match_score": integer 0-10 (overall weighted rating),
+  "score_breakdown": {
+    "experience_match": integer 0-10,
+    "skills_match": integer 0-10,
+    "responsibilities_match": integer 0-10
+  },
+  "gap_analysis": string[] (missing skills/tools/experience highlighted as important in the job),
+  "resume_suggestions": string[] (actionable, concrete resume modifications for this exact job)
+}`
+      },
+      {
+        role: "user",
+        content: `Parsed Resume:\n${JSON.stringify(resume, null, 2)}\n\nJob Title: ${jobTitle}\nJob Description:\n"""\n${jobDescription}\n"""`
       }
-    }
+    ]
   }));
 
-  const rawText = response.text || "{}";
+  const rawText = response.choices[0]?.message?.content || "{}";
   return JSON.parse(cleanJsonResponse(rawText));
 }
 

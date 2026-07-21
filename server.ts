@@ -50,12 +50,15 @@ function checkCronSecret(req: express.Request, res: express.Response, next: expr
 // NOTE: never send SUPABASE_SERVICE_ROLE_KEY to the client — anon key only.
 app.get("/api/auth/status", (req, res) => {
   const isConfigured = isSupabaseConfigured();
+  // Embeddings need GEMINI_API_KEY; resume parsing and job scoring need
+  // GROQ_API_KEY — both are required for the AI pipeline to actually work.
+  const aiConfigured = !!process.env.GEMINI_API_KEY && !!process.env.GROQ_API_KEY;
   res.json({
     supabaseConfigured: isConfigured,
     supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL,
     supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    geminiConfigured: !!process.env.GEMINI_API_KEY,
-    demoMode: !isConfigured || !process.env.GEMINI_API_KEY,
+    geminiConfigured: aiConfigured,
+    demoMode: !isConfigured || !aiConfigured,
     message: isConfigured
       ? "Supabase connected. Live database and auth active."
       : "Running in Sandbox Demo Mode with persistent mock storage."
