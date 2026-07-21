@@ -31,7 +31,7 @@ export const RatingCard: React.FC<RatingCardProps> = ({ match }) => {
   };
 
   const scorePercent = score * 10;
-  const radius = 24;
+  const radius = 30;
   const circumference = 2 * Math.PI * radius;
   const strokeOffset = circumference - (scorePercent / 100) * circumference;
 
