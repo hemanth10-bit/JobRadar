@@ -72,31 +72,28 @@ app.post("/api/resume/parse", upload.single("resume"), async (req: any, res) => 
       return res.status(400).json({ error: "No file uploaded" });
     }
 
-    let rawText = "";
-
     const isPdf = req.file.mimetype === "application/pdf" ||
                   (req.file.originalname && req.file.originalname.toLowerCase().endsWith(".pdf"));
 
-    if (isPdf) {
-      // Loaded lazily (not at module top-level) so a failure to load this
-      // dependency only fails this one request instead of crashing the whole
-      // serverless function on cold start. unpdf ships a serverless-safe
-      // PDF.js build with no native/canvas dependency for plain text extraction.
-      let getDocumentProxy: typeof import("unpdf").getDocumentProxy;
-      let extractText: typeof import("unpdf").extractText;
-      try {
-        ({ getDocumentProxy, extractText } = await import("unpdf"));
-      } catch (loadErr: any) {
-        console.error("Failed to load unpdf module:", loadErr);
-        return res.status(503).json({ error: "PDF parsing is temporarily unavailable. Try uploading a .txt/.docx version, or contact support." });
-      }
-
-      const pdfDoc = await getDocumentProxy(new Uint8Array(req.file.buffer));
-      const { text } = await extractText(pdfDoc, { mergePages: true });
-      rawText = text || "";
-    } else {
-      rawText = req.file.buffer.toString("utf-8");
+    if (!isPdf) {
+      return res.status(400).json({ error: "Only PDF resumes are supported." });
     }
+
+    // Loaded lazily (not at module top-level) so a failure to load this
+    // dependency only fails this one request instead of crashing the whole
+    // serverless function on cold start. unpdf ships a serverless-safe
+    // PDF.js build with no native/canvas dependency for plain text extraction.
+    let getDocumentProxy: typeof import("unpdf").getDocumentProxy;
+    let extractText: typeof import("unpdf").extractText;
+    try {
+      ({ getDocumentProxy, extractText } = await import("unpdf"));
+    } catch (loadErr: any) {
+      console.error("Failed to load unpdf module:", loadErr);
+      return res.status(503).json({ error: "PDF parsing is temporarily unavailable. Please try again shortly." });
+    }
+
+    const pdfDoc = await getDocumentProxy(new Uint8Array(req.file.buffer));
+    const { text: rawText } = await extractText(pdfDoc, { mergePages: true });
 
     if (!rawText.trim()) {
       return res.status(400).json({ error: "Failed to extract text from resume. Ensure the file is not empty or protected." });

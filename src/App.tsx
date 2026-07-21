@@ -69,10 +69,10 @@ function MainDashboard() {
   };
 
   const processUploadedFile = async (file: File) => {
-    // Validate file type
-    const validTypes = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"];
-    if (!validTypes.includes(file.type) && !file.name.endsWith(".docx") && !file.name.endsWith(".pdf")) {
-      setUploadError("Invalid file format. Please upload a PDF or DOCX file.");
+    // Validate file type — only PDF is actually parsed correctly server-side
+    const validTypes = ["application/pdf"];
+    if (!validTypes.includes(file.type) && !file.name.endsWith(".pdf")) {
+      setUploadError("Invalid file format. Please upload a PDF file.");
       return;
     }
 
@@ -281,7 +281,7 @@ function MainDashboard() {
                   </div>
                   <div className="space-y-1">
                     <h3 className="text-xs font-semibold text-white">Drag and drop your resume</h3>
-                    <p className="text-[10px] text-zinc-500 font-mono">Supports PDF or DOCX format</p>
+                    <p className="text-[10px] text-zinc-500 font-mono">Supports PDF format only</p>
                   </div>
                   <button
                     onClick={triggerFileInput}
@@ -298,7 +298,7 @@ function MainDashboard() {
                 ref={fileInputRef}
                 type="file"
                 className="hidden"
-                accept=".pdf,.docx,.doc,.txt"
+                accept=".pdf"
                 onChange={handleFileChange}
               />
 
