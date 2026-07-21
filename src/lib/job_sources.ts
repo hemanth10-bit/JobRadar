@@ -59,22 +59,21 @@ export class JSearchAdapter implements JobSourceAdapter {
   enabled = true;
 
   async fetchJobs(query: string, country: string, page: number): Promise<IngestedJobInput[]> {
-    const rapidKey = process.env.RAPIDAPI_KEY;
+    const apiKey = process.env.OPENWEBNINJA_API_KEY;
 
-    if (!rapidKey) {
-      console.warn("RapidAPI Key missing. Skipping JSearch.");
+    if (!apiKey) {
+      console.warn("OpenWeb Ninja API key missing. Skipping JSearch.");
       return [];
     }
 
     // Append country keyword to query to scope it naturally
     const cKeyword = country.toUpperCase() !== 'ALL' ? ` in ${country.toUpperCase()}` : "";
-    const url = `https://jsearch.p.rapidapi.com/search?query=${encodeURIComponent(query + cKeyword)}&page=${page}&num_pages=1`;
+    const url = `https://api.openwebninja.com/jsearch/search-v2?query=${encodeURIComponent(query + cKeyword)}&page=${page}`;
 
     try {
       const response = await fetch(url, {
         headers: {
-          "x-rapidapi-key": rapidKey,
-          "x-rapidapi-host": "jsearch.p.rapidapi.com"
+          "x-api-key": apiKey
         }
       });
       if (!response.ok) {
@@ -92,7 +91,9 @@ export class JSearchAdapter implements JobSourceAdapter {
         country: country.toLowerCase() === 'all' ? (job.job_country || "us").toLowerCase() : country.toLowerCase(),
         description: job.job_description || "",
         apply_url: job.job_apply_link || "",
-        posted_date: job.job_posted_at_datetime_utc || new Date().toISOString()
+        // Field name unconfirmed on the direct API (docs weren't fully
+        // reachable) — fall back through both possibilities before "now".
+        posted_date: job.job_posted_at_datetime_utc || job.job_posted_at || new Date().toISOString()
       }));
     } catch (err) {
       console.warn("Failed to fetch from JSearch.", err);
