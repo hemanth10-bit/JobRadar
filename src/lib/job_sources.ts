@@ -212,6 +212,71 @@ export class ArbeitnowAdapter implements JobSourceAdapter {
 }
 
 // ==========================================
+// 5. JOOBLE ADAPTER (Free key, 69-country coverage, no documented rate cap)
+// ==========================================
+// Jooble's location parameter is free-text (country/city name), not an ISO
+// code, so the app's ISO country codes need mapping to a name it understands.
+const JOOBLE_COUNTRY_NAMES: Record<string, string> = {
+  us: "United States",
+  gb: "United Kingdom",
+  in: "India",
+  ca: "Canada",
+  au: "Australia",
+  de: "Germany",
+  sg: "Singapore",
+  ae: "United Arab Emirates"
+};
+
+export class JoobleAdapter implements JobSourceAdapter {
+  name = "jooble";
+  enabled = true;
+
+  async fetchJobs(query: string, country: string, page: number): Promise<IngestedJobInput[]> {
+    const apiKey = process.env.JOOBLE_API_KEY;
+
+    if (!apiKey) {
+      console.warn("Jooble API key missing. Skipping this source.");
+      return [];
+    }
+
+    const c = country.toLowerCase();
+    const location = c === 'all' ? "" : (JOOBLE_COUNTRY_NAMES[c] || "");
+
+    try {
+      const response = await fetch(`https://jooble.org/api/${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keywords: query,
+          location,
+          page: String(page)
+        })
+      });
+      if (!response.ok) {
+        throw new Error(`Jooble API error: ${response.statusText}`);
+      }
+      const resData = await response.json();
+      if (!resData.jobs) return [];
+
+      return resData.jobs.map((job: any) => ({
+        external_job_id: job.id ? String(job.id) : job.link,
+        source_id: this.name,
+        title: job.title || "Job Title",
+        company: job.company || "Confidential",
+        location: job.location || "N/A",
+        country: c === 'all' ? "all" : c,
+        description: job.snippet || "",
+        apply_url: job.link || "",
+        posted_date: job.updated ? new Date(job.updated).toISOString() : new Date().toISOString()
+      }));
+    } catch (err) {
+      console.warn("Failed to fetch from Jooble.", err);
+      return [];
+    }
+  }
+}
+
+// ==========================================
 // CENTRAL ADAPTER MANAGER
 // ==========================================
 export class JobSourcesManager {
@@ -222,7 +287,8 @@ export class JobSourcesManager {
       new AdzunaAdapter(),
       new JSearchAdapter(),
       new RemotiveAdapter(),
-      new ArbeitnowAdapter()
+      new ArbeitnowAdapter(),
+      new JoobleAdapter()
     ];
   }
 
