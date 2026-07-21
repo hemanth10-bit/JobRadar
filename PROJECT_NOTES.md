@@ -26,8 +26,11 @@ whichever specific source files are relevant to the next task.
     most resume/job-requirement extraction without calling any LLM at all;
     job-requirements extraction *never* calls an LLM anymore (that data isn't
     used in matching, so no quality tradeoff).
-- **Job ingestion**: `src/lib/job_sources.ts` — Adzuna, JSearch (RapidAPI),
-  Remotive, Arbeitnow adapters, aggregated by `JobSourcesManager`.
+- **Job ingestion**: `src/lib/job_sources.ts` — Adzuna, JSearch (direct
+  OpenWeb Ninja API, not RapidAPI — see issue #21), Remotive, Arbeitnow
+  adapters, aggregated by `JobSourcesManager`. No fake-fallback jobs on
+  failure (removed — see issue #20); a source with missing credentials or a
+  failed call just contributes zero jobs.
 - **Pipeline**: `runJobMatchingPipelineForUser` in `server.ts` — fetch jobs →
   dedupe/ingest → backfill embeddings+requirements → vector-similarity
   shortlist (pgvector) → Groq scores each shortlisted job → cache in
@@ -210,6 +213,48 @@ whichever specific source files are relevant to the next task.
     now-inaccurate "Scored using Gemini 1.5 & 2.0" / "Powered by Google
     Gemini" UI copy in `App.tsx` to reflect Groq's role.
 
+19. **Resume upload silently mangled DOCX/TXT** — advertised as supported but
+    never actually parsed correctly (binary `.docx` read as raw UTF-8 text).
+    → `src/App.tsx`: `processUploadedFile` only accepts `application/pdf`,
+    rejects everything else client-side. `server.ts`'s `/api/resume/parse`
+    now enforces the same check server-side (MIME type or `.pdf` extension)
+    before ever touching the parser — restricts uploads to PDF only, front
+    and back end.
+
+20. **Every job-source adapter faked results on failure** — Adzuna, JSearch,
+    Remotive, and Arbeitnow each fell back to hardcoded sample job postings
+    (`SAMPLE_JOBS_BY_COUNTRY` in `job_sources.ts`) whenever their API call
+    failed or credentials were missing, with dead `https://example.com/...`
+    apply links. These looked like real, clickable jobs in the UI.
+    → `src/lib/job_sources.ts`: removed `SAMPLE_JOBS_BY_COUNTRY` and
+    `getFallbackJobs()` entirely. Every adapter now returns `[]` on missing
+    credentials or a failed fetch — a broken/unconfigured source just
+    contributes zero jobs instead of fake ones.
+
+21. **JSearch adapter was calling the wrong API for the user's key** — the
+    adapter hit `jsearch.p.rapidapi.com` with `x-rapidapi-*` headers, but the
+    user has a key issued directly by **OpenWeb Ninja** (openwebninja.com),
+    not a RapidAPI-issued key — these are separate credential systems even
+    though OpenWeb Ninja is JSearch's publisher on RapidAPI too. Result: a
+    404 on every call (confirmed via Vercel logs).
+    → `src/lib/job_sources.ts`: `JSearchAdapter` now calls
+    `https://api.openwebninja.com/jsearch/search-v2` directly with an
+    `x-api-key` header, reading a new `OPENWEBNINJA_API_KEY` env var (old
+    `RAPIDAPI_KEY` removed everywhere, including `.env.example`). **Two
+    details are unconfirmed** (public docs were not fully reachable during
+    research): whether `page`/`num_pages`-style pagination still works on
+    `/search-v2` vs. being cursor-based, and the exact posted-date field name
+    (code defensively tries `job_posted_at_datetime_utc` then `job_posted_at`
+    then falls back to "now"). Watch Vercel logs after deploy to confirm
+    pagination behaves as expected across multiple pages/searches.
+
+22. **Google OAuth `Error 400: redirect_uri_mismatch`** — not a code bug;
+    Google Cloud Console's OAuth client didn't have Supabase's callback URL
+    (`https://oydohmdulwcbivxabhrg.supabase.co/auth/v1/callback`) registered
+    under Authorized redirect URIs. Fixed entirely in Google Cloud Console
+    (Credentials → OAuth 2.0 Client → Authorized redirect URIs) — no repo
+    changes. Noting here in case it recurs after rotating OAuth credentials.
+
 ## Evaluated but not implemented
 
 - **Findwork.dev** as an additional job source — plausible, but requires a
@@ -231,7 +276,7 @@ whichever specific source files are relevant to the next task.
 | `src/lib/ai.ts` | Gemini client (embeddings only) + Groq client (resume parsing, match scoring) + both retry helpers |
 | `src/lib/embeddings.ts` | Gemini embedding generation |
 | `src/lib/deterministic_parser.ts` | Free regex/dictionary resume & job parsing |
-| `src/lib/job_sources.ts` | Adzuna/JSearch/Remotive/Arbeitnow adapters |
+| `src/lib/job_sources.ts` | Adzuna/JSearch (OpenWeb Ninja direct)/Remotive/Arbeitnow adapters |
 | `src/lib/geolocation.ts` | Browser geolocation → country code |
 | `src/context/AppContext.tsx` | Frontend state/actions, `apiFetch` with auth |
 | `src/App.tsx` | Main dashboard UI |
@@ -250,3 +295,7 @@ whichever specific source files are relevant to the next task.
 - Decide whether to add Findwork.dev as a second job source.
 - If Groq's 14,400/day ever becomes limiting (unlikely at current scale, ~10
   users), consider its paid tier or a second provider for overflow.
+- **JSearch/OpenWeb Ninja needs a live smoke test**: add `OPENWEBNINJA_API_KEY`
+  to Vercel, redeploy, and check logs for whether `/search-v2` pagination
+  (`page` param) actually returns different results per page, and which
+  posted-date field name the response actually uses (see issue #21).
