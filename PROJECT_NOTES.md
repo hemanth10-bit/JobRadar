@@ -14,15 +14,23 @@ whichever specific source files are relevant to the next task.
 - **Data**: Supabase/Postgres + pgvector (`supabase/migrations/*.sql`). Falls
   back to an in-memory `localDB` (in `src/lib/db.ts`) when Supabase isn't
   configured — this is "demo mode," used for local dev without credentials.
-- **AI**: Google Gemini — resume parsing, match scoring, embeddings
-  (`src/lib/ai.ts`, `src/lib/embeddings.ts`). A free deterministic parser
-  (`src/lib/deterministic_parser.ts`) handles most resume/job-requirement
-  extraction without Gemini, to conserve the very limited free-tier quota.
+- **AI**: split across two providers (`src/lib/ai.ts`, `src/lib/embeddings.ts`):
+  - **Gemini** — embeddings only (`generateEmbedding`). Groq has no embedding
+    models, so this stays on Gemini regardless.
+  - **Groq** (`llama-3.1-8b-instant`) — resume parsing (`parseResumeText`)
+    and job-match scoring (`scoreJobMatch`). Switched from Gemini because its
+    free tier (as low as 20 requests/day for `generateContent`) was the root
+    cause of matches never appearing — Groq's free tier gives this model
+    14,400 requests/day.
+  - A free deterministic parser (`src/lib/deterministic_parser.ts`) handles
+    most resume/job-requirement extraction without calling any LLM at all;
+    job-requirements extraction *never* calls an LLM anymore (that data isn't
+    used in matching, so no quality tradeoff).
 - **Job ingestion**: `src/lib/job_sources.ts` — Adzuna, JSearch (RapidAPI),
   Remotive, Arbeitnow adapters, aggregated by `JobSourcesManager`.
 - **Pipeline**: `runJobMatchingPipelineForUser` in `server.ts` — fetch jobs →
   dedupe/ingest → backfill embeddings+requirements → vector-similarity
-  shortlist (pgvector) → Gemini scores each shortlisted job → cache in
+  shortlist (pgvector) → Groq scores each shortlisted job → cache in
   `job_matches`. Triggered ONLY by the explicit "Search For New Jobs" button
   (`POST /api/pipeline/search-match`) — never by resume save or country change.
 
@@ -41,11 +49,18 @@ whichever specific source files are relevant to the next task.
   `console.log`/`console.error` calls show up) are in a separate "Logs" /
   "Runtime Logs" view and only populate while a request is being handled —
   open that view, then trigger the action in the app.
-- **Gemini free tier is the biggest ongoing constraint**: `gemini-3.5-flash`
-  is capped at **20 requests/day**. With the current per-run scoring cap of
-  8 jobs, that's roughly 2 full "Search For New Jobs" runs per day before
-  hitting `RESOURCE_EXHAUSTED` for the rest of the day. No code fix changes
-  this — it requires a Gemini billing/plan upgrade if more volume is needed.
+- **Gemini's free tier was the biggest constraint, now resolved for the
+  scoring/parsing path**: `gemini-3.5-flash` (`generateContent`) is capped
+  at as low as **20 requests/day**, which made matches never appear (see
+  issue #16). Fixed by moving parsing/scoring to **Groq**
+  (`llama-3.1-8b-instant`, 14,400 requests/day free) — see issue #17.
+  Gemini is still used for embeddings, but that's a separate quota bucket
+  that was never actually the bottleneck (confirmed via logs — embedding
+  calls kept succeeding while `generateContent` calls were exhausted).
+- **New required env var: `GROQ_API_KEY`.** Get a free key (no credit card)
+  at console.groq.com/keys. Must be added to Vercel's environment variables
+  (Project Settings → Environment Variables) and the app redeployed — same
+  as any other env var here, not auto-provisioned.
 - User's test account email: `hemanth8892@gmail.com`.
 
 ## Issues found and fixed, in order
@@ -172,6 +187,29 @@ whichever specific source files are relevant to the next task.
     and fails fast instead of retrying. Also added a 10-result display cap
     on the dashboard (`App.tsx`).
 
+17. **Follow-up to #16: Groq quota exhausted quickly too, until the deeper
+    fix.** Once requirements-extraction stopped burning quota, the *actual*
+    remaining constraint was Gemini's 20/day cap on `generateContent` itself
+    (used for both parsing and scoring) — 8 scoring calls per run could burn
+    through most of a day's budget on its own.
+    → Swapped `parseResumeText` and `scoreJobMatch` from Gemini to **Groq**
+    (`llama-3.1-8b-instant`, 14,400 req/day free). New `groq-sdk` dependency
+    (zero sub-dependencies, no native-binary risk like `pdf-parse` had).
+    Uses `response_format: { type: "json_object" }` with the exact schema
+    spelled out in the prompt (Groq's free-tier llama models guarantee valid
+    JSON syntax but not exact schema match, unlike Gemini's `responseSchema`
+    — acceptable since malformed responses are already isolated/skipped
+    per-job by existing error handling). New `withGroqRetry` mirrors
+    `withGeminiRetry`'s backoff logic. Gemini (`getGeminiClient`,
+    `withGeminiRetry`) untouched — still used by `embeddings.ts`. Requires
+    `GROQ_API_KEY` (see env notes above). `/api/auth/status` now requires
+    both `GEMINI_API_KEY` and `GROQ_API_KEY` to report "configured."
+
+18. **Cosmetic**: browser tab title was still the AI-Studio-scaffold default
+    ("My Google AI Studio App") — fixed in `index.html`. Also updated
+    now-inaccurate "Scored using Gemini 1.5 & 2.0" / "Powered by Google
+    Gemini" UI copy in `App.tsx` to reflect Groq's role.
+
 ## Evaluated but not implemented
 
 - **Findwork.dev** as an additional job source — plausible, but requires a
@@ -190,7 +228,7 @@ whichever specific source files are relevant to the next task.
 | `server.ts` | Express app, all API routes, central job-matching pipeline |
 | `src/lib/auth.ts` | JWT verification / `resolveUserId` |
 | `src/lib/db.ts` | `DbService` — Supabase + in-memory dual-mode data layer |
-| `src/lib/ai.ts` | Gemini client, resume parsing, match scoring, retry helper |
+| `src/lib/ai.ts` | Gemini client (embeddings only) + Groq client (resume parsing, match scoring) + both retry helpers |
 | `src/lib/embeddings.ts` | Gemini embedding generation |
 | `src/lib/deterministic_parser.ts` | Free regex/dictionary resume & job parsing |
 | `src/lib/job_sources.ts` | Adzuna/JSearch/Remotive/Arbeitnow adapters |
@@ -204,7 +242,11 @@ whichever specific source files are relevant to the next task.
 
 ## Open items / next steps
 
-- Confirm the Gemini-quota fix actually produces visible matches on a fresh
-  daily quota (in progress as of the last message in this session).
+- **Not yet tested end-to-end**: the Groq swap has been type-checked, build-
+  verified, and SDK-load-verified, but never called against the real Groq
+  API (no key available in the sandbox this was built in). User needs to add
+  `GROQ_API_KEY` to Vercel, redeploy, and confirm "Search For New Jobs"
+  actually produces matches now.
 - Decide whether to add Findwork.dev as a second job source.
-- Decide whether to raise the Gemini quota/plan if 20/day remains limiting.
+- If Groq's 14,400/day ever becomes limiting (unlikely at current scale, ~10
+  users), consider its paid tier or a second provider for overflow.
