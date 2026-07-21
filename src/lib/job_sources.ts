@@ -7,97 +7,6 @@ export interface JobSourceAdapter {
 }
 
 // ==========================================
-// SAMPLE FALLBACK JOBS FOR GRACEFUL DEVELOPMENT
-// ==========================================
-const SAMPLE_JOBS_BY_COUNTRY: Record<string, Omit<IngestedJobInput, 'posted_date'>[]> = {
-  us: [
-    {
-      source_id: "sample",
-      external_job_id: "sample-us-1",
-      title: "React Frontend Engineer",
-      company: "Innovate Tech",
-      location: "San Francisco, CA",
-      country: "us",
-      description: "We are looking for a React Frontend Engineer with 3+ years of experience. Must be proficient in TypeScript, React 18, Tailwind CSS, and state management. Experience with Vite, Next.js, and animations (Motion) is a big plus. Responsibilities include building responsive UI components, integrating RESTful APIs, and maintaining code quality.",
-      apply_url: "https://example.com/apply/sample-us-1"
-    },
-    {
-      source_id: "sample",
-      external_job_id: "sample-us-2",
-      title: "Full-Stack Node.js Developer",
-      company: "CloudCore Systems",
-      location: "Austin, TX (Remote)",
-      country: "us",
-      description: "Seeking a Full-Stack Node.js Developer. Required skills: Node.js, Express, PostgreSQL, Prisma or Drizzle ORM, and React. Responsibilities: designing secure REST APIs, designing database schemas, integrating authentication (OAuth/JWT), and optimizing system performance. Experience with AWS or Google Cloud is desired. 4+ years of experience expected.",
-      apply_url: "https://example.com/apply/sample-us-2"
-    },
-    {
-      source_id: "sample",
-      external_job_id: "sample-us-3",
-      title: "Senior AI Engineer (Gemini / LLMs)",
-      company: "Cognitive Labs",
-      location: "New York, NY",
-      country: "us",
-      description: "Join our core team to build AI-powered agents. We require deep experience with LLM orchestration, prompt engineering, vector embeddings, and semantic search (pgvector). Proficiency in Python, Node.js, and the Google GenAI SDK (@google/genai) is essential. Responsibilities include deploying RAG systems, tuning prompts, and creating robust LLM processing chains.",
-      apply_url: "https://example.com/apply/sample-us-3"
-    }
-  ],
-  in: [
-    {
-      source_id: "sample",
-      external_job_id: "sample-in-1",
-      title: "Software Development Engineer - React",
-      company: "TechMahal Solutions",
-      location: "Bengaluru, Karnataka (Hybrid)",
-      country: "in",
-      description: "Looking for an SDE with strong expertise in React, TypeScript, and CSS frameworks like Tailwind. You will own client-side applications, collaborate with designers on Figma components, and implement real-time data visualizers (Recharts/D3). Requirements: 2-4 years experience, excellent problem solving, and basic Node.js familiarity.",
-      apply_url: "https://example.com/apply/sample-in-1"
-    },
-    {
-      source_id: "sample",
-      external_job_id: "sample-in-2",
-      title: "Backend Engineer (Node.js & Express)",
-      company: "Aura Fintech",
-      location: "Mumbai, Maharashtra",
-      country: "in",
-      description: "Aura Fintech is hiring a Backend SDE. You will design scalable web microservices in Node.js, secure APIs, and run migrations on Postgres databases. Skills: Node, Express, SQL, Redis, Firebase. Experience with OAuth flows, payment gateways, and containerization (Docker) is highly valued.",
-      apply_url: "https://example.com/apply/sample-in-2"
-    }
-  ],
-  gb: [
-    {
-      source_id: "sample",
-      external_job_id: "sample-gb-1",
-      title: "Senior Frontend Engineer (Vite / React / Tailwind)",
-      company: "Vanguard Retail Ltd",
-      location: "London, England",
-      country: "gb",
-      description: "We are seeking a senior front-end practitioner to build out our high-speed e-commerce interface. Requirements: 6+ years in frontend, 3+ years writing TypeScript and React. Must be an expert in Tailwind CSS and build tooling (Vite/Rollup). Responsibilities include code auditing, profiling browser rendering performance, and driving robust component designs.",
-      apply_url: "https://example.com/apply/sample-gb-1"
-    }
-  ],
-  all: [
-    {
-      source_id: "sample",
-      external_job_id: "sample-remote-1",
-      title: "Remote Frontend Developer (Global)",
-      company: "Nomad Interactive",
-      location: "Fully Remote",
-      country: "all",
-      description: "Nomad Interactive is a remote-first studio. We are searching for a React developer with experience in Tailwind CSS, responsive web layouts, and interactive charts (using recharts or d3). You must be capable of working autonomously. Experience with REST API consumption and web security basics is required.",
-      apply_url: "https://example.com/apply/sample-remote-1"
-    }
-  ]
-};
-
-// Generic helper to get custom date in UTC string
-function getSampleDateString(offsetDays = 0): string {
-  const d = new Date();
-  d.setDate(d.getDate() - offsetDays);
-  return d.toISOString();
-}
-
-// ==========================================
 // 1. ADZUNA ADAPTER (Requires app_id and app_key)
 // ==========================================
 export class AdzunaAdapter implements JobSourceAdapter {
@@ -109,8 +18,8 @@ export class AdzunaAdapter implements JobSourceAdapter {
     const appKey = process.env.ADZUNA_APP_KEY;
 
     if (!appId || !appKey) {
-      console.warn("Adzuna API credentials missing. Returning country fallback jobs.");
-      return getFallbackJobs(country, query);
+      console.warn("Adzuna API credentials missing. Skipping this source.");
+      return [];
     }
 
     const c = country.toLowerCase() === 'all' ? 'us' : country.toLowerCase();
@@ -136,8 +45,8 @@ export class AdzunaAdapter implements JobSourceAdapter {
         posted_date: job.created || new Date().toISOString()
       }));
     } catch (err) {
-      console.warn("Failed to fetch from Adzuna, returning fallbacks.", err);
-      return getFallbackJobs(country, query);
+      console.warn("Failed to fetch from Adzuna.", err);
+      return [];
     }
   }
 }
@@ -153,8 +62,8 @@ export class JSearchAdapter implements JobSourceAdapter {
     const rapidKey = process.env.RAPIDAPI_KEY;
 
     if (!rapidKey) {
-      console.warn("RapidAPI Key missing. Returning country fallback jobs for JSearch.");
-      return getFallbackJobs(country, query);
+      console.warn("RapidAPI Key missing. Skipping JSearch.");
+      return [];
     }
 
     // Append country keyword to query to scope it naturally
@@ -186,8 +95,8 @@ export class JSearchAdapter implements JobSourceAdapter {
         posted_date: job.job_posted_at_datetime_utc || new Date().toISOString()
       }));
     } catch (err) {
-      console.warn("Failed to fetch from JSearch, returning fallbacks.", err);
-      return getFallbackJobs(country, query);
+      console.warn("Failed to fetch from JSearch.", err);
+      return [];
     }
   }
 }
@@ -234,8 +143,8 @@ export class RemotiveAdapter implements JobSourceAdapter {
         posted_date: job.publication_date || new Date().toISOString()
       }));
     } catch (err) {
-      console.warn("Failed to fetch from Remotive, returning fallbacks.", err);
-      return getFallbackJobs(country, query);
+      console.warn("Failed to fetch from Remotive.", err);
+      return [];
     }
   }
 }
@@ -295,21 +204,10 @@ export class ArbeitnowAdapter implements JobSourceAdapter {
           : new Date().toISOString()
       }));
     } catch (err) {
-      console.warn("Failed to fetch from Arbeitnow, returning fallbacks.", err);
-      return getFallbackJobs(country, query);
+      console.warn("Failed to fetch from Arbeitnow.", err);
+      return [];
     }
   }
-}
-
-// Helper to construct mock fallbacks dynamically
-function getFallbackJobs(country: string, query: string): IngestedJobInput[] {
-  const code = country.toLowerCase();
-  const rawList = SAMPLE_JOBS_BY_COUNTRY[code] || SAMPLE_JOBS_BY_COUNTRY['us'] || SAMPLE_JOBS_BY_COUNTRY['all'];
-  
-  return rawList.map((job, idx) => ({
-    ...job,
-    posted_date: getSampleDateString(idx * 2)
-  }));
 }
 
 // ==========================================
