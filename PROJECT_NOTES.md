@@ -255,6 +255,18 @@ whichever specific source files are relevant to the next task.
     (Credentials → OAuth 2.0 Client → Authorized redirect URIs) — no repo
     changes. Noting here in case it recurs after rotating OAuth credentials.
 
+23. **Added Jooble** as a 5th job source — free key, 69-country coverage, no
+    documented rate cap on the free tier, filling the gap left by JSearch's
+    tight 200 req/month limit.
+    → New `JoobleAdapter` in `src/lib/job_sources.ts` (`POST
+    jooble.org/api/{key}` with `keywords`/`location`/`page` JSON body).
+    Jooble's `location` param is free-text, not an ISO code, so a small
+    `JOOBLE_COUNTRY_NAMES` map translates the app's country codes. Registered
+    in `JobSourcesManager`. Requires new `JOOBLE_API_KEY` env var (key is
+    auto-issued via a signup form at jooble.org/api/about, no manual
+    approval wait — unlike the CareerOneStop friction that got it rejected).
+    Not yet live-tested against a real key.
+
 ## Evaluated but not implemented
 
 - **Findwork.dev** as an additional job source — plausible, but requires a
@@ -276,7 +288,7 @@ whichever specific source files are relevant to the next task.
 | `src/lib/ai.ts` | Gemini client (embeddings only) + Groq client (resume parsing, match scoring) + both retry helpers |
 | `src/lib/embeddings.ts` | Gemini embedding generation |
 | `src/lib/deterministic_parser.ts` | Free regex/dictionary resume & job parsing |
-| `src/lib/job_sources.ts` | Adzuna/JSearch (OpenWeb Ninja direct)/Remotive/Arbeitnow adapters |
+| `src/lib/job_sources.ts` | Adzuna/JSearch (OpenWeb Ninja direct)/Remotive/Arbeitnow/Jooble adapters |
 | `src/lib/geolocation.ts` | Browser geolocation → country code |
 | `src/context/AppContext.tsx` | Frontend state/actions, `apiFetch` with auth |
 | `src/App.tsx` | Main dashboard UI |
@@ -299,3 +311,7 @@ whichever specific source files are relevant to the next task.
   to Vercel, redeploy, and check logs for whether `/search-v2` pagination
   (`page` param) actually returns different results per page, and which
   posted-date field name the response actually uses (see issue #21).
+- **Jooble needs a live smoke test**: sign up at jooble.org/api/about, add
+  `JOOBLE_API_KEY` to Vercel, redeploy, and confirm real results come back
+  (response field names/shape assumed from general knowledge, not verified
+  against a live key — see issue #23).
