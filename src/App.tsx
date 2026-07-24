@@ -221,6 +221,9 @@ function MainDashboard() {
                         {currentSelectedResume.parsed_json.titles?.slice(0, 3).map((title, i) => (
                           <span key={i} className="text-[10px] font-semibold bg-zinc-950 text-zinc-300 border border-white/5 px-2.5 py-1 rounded-full">{title}</span>
                         ))}
+                        {(currentSelectedResume.parsed_json.titles?.length || 0) > 3 && (
+                          <span className="text-[10px] text-zinc-500 font-bold">+{currentSelectedResume.parsed_json.titles.length - 3} more</span>
+                        )}
                       </div>
                     </div>
 
