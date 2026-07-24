@@ -70,12 +70,23 @@ export function getGeminiClient(): GoogleGenAI {
 // task) — stays on the fast/high-quota 8b model.
 const GROQ_MODEL = "llama-3.1-8b-instant";
 // Scoring is capped at 8 fresh calls/run (see server.ts SCORING_CAP_PER_RUN)
-// and needs better judgment on nuanced fit, so it gets the larger model.
+// and needs better judgment on nuanced fit, so it gets a larger model.
 // Free tier: 1,000 req/day, 100K tokens/day — comfortable at this cap/scale,
 // but tokens/day is worth watching if usage grows (prompts carry the full
 // job description + resume JSON).
 const GROQ_SCORING_MODEL = "llama-3.3-70b-versatile";
+// Fallback scoring model if the primary hits ITS OWN daily quota (separate
+// quota bucket from GROQ_SCORING_MODEL, since it's a different model) —
+// same 1,000 req/day but a higher 200K tokens/day ceiling.
+const GROQ_SCORING_FALLBACK_MODEL = "openai/gpt-oss-120b";
 let groqInstance: Groq | null = null;
+
+// A Groq 429 whose message mentions "per day" is a daily quota exhaustion,
+// same reasoning as isDailyQuotaExhausted for Gemini above — it can't
+// recover mid-request, so don't burn retries on it, fail/fallback fast.
+function isGroqDailyQuotaExhausted(err: unknown): boolean {
+  return err instanceof GroqAPIError && err.status === 429 && /per day/i.test((err as Error).message || "");
+}
 
 function getGroqClient(): Groq {
   if (!groqInstance) {
@@ -97,7 +108,7 @@ export async function withGroqRetry<T>(fn: () => Promise<T>, maxRetries = 3): Pr
       return await fn();
     } catch (err) {
       lastErr = err;
-      const isRetryable = err instanceof GroqAPIError && !!err.status && GROQ_RETRYABLE_STATUS_CODES.has(err.status);
+      const isRetryable = err instanceof GroqAPIError && !!err.status && GROQ_RETRYABLE_STATUS_CODES.has(err.status) && !isGroqDailyQuotaExhausted(err);
       if (!isRetryable || attempt === maxRetries) {
         throw err;
       }
@@ -173,17 +184,12 @@ export interface MatchScoreResult {
   resume_suggestions: string[];
 }
 
-export async function scoreJobMatch(
+function buildScoringMessages(
   resume: ParsedResume,
   jobTitle: string,
   jobDescription: string
-): Promise<MatchScoreResult> {
-  const groq = getGroqClient();
-
-  const response = await withGroqRetry(() => groq.chat.completions.create({
-    model: GROQ_SCORING_MODEL,
-    response_format: { type: "json_object" },
-    messages: [
+): Groq.Chat.Completions.ChatCompletionMessageParam[] {
+  return [
       {
         role: "system",
         content: `You are a strict, evidence-based technical recruiter scoring how well a candidate's resume matches a specific job. Be realistic — most resumes are partial matches, not perfect ones. Do not inflate scores to be encouraging.
@@ -222,8 +228,35 @@ Respond ONLY with a single JSON object matching exactly this shape, no other tex
         role: "user",
         content: `Parsed Resume:\n${JSON.stringify(resume, null, 2)}\n\nJob Title: ${jobTitle}\nJob Description:\n"""\n${jobDescription}\n"""`
       }
-    ]
-  }));
+  ];
+}
+
+export async function scoreJobMatch(
+  resume: ParsedResume,
+  jobTitle: string,
+  jobDescription: string
+): Promise<MatchScoreResult> {
+  const groq = getGroqClient();
+  const messages = buildScoringMessages(resume, jobTitle, jobDescription);
+
+  let response;
+  try {
+    response = await withGroqRetry(() => groq.chat.completions.create({
+      model: GROQ_SCORING_MODEL,
+      response_format: { type: "json_object" },
+      messages
+    }));
+  } catch (err) {
+    if (!isGroqDailyQuotaExhausted(err)) {
+      throw err;
+    }
+    console.warn(`${GROQ_SCORING_MODEL} hit its daily quota, falling back to ${GROQ_SCORING_FALLBACK_MODEL} for scoring.`);
+    response = await withGroqRetry(() => groq.chat.completions.create({
+      model: GROQ_SCORING_FALLBACK_MODEL,
+      response_format: { type: "json_object" },
+      messages
+    }));
+  }
 
   const rawText = response.choices[0]?.message?.content || "{}";
   return JSON.parse(cleanJsonResponse(rawText));
