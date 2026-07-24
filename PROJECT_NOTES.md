@@ -17,11 +17,12 @@ whichever specific source files are relevant to the next task.
 - **AI**: split across two providers (`src/lib/ai.ts`, `src/lib/embeddings.ts`):
   - **Gemini** — embeddings only (`generateEmbedding`). Groq has no embedding
     models, so this stays on Gemini regardless.
-  - **Groq** (`llama-3.1-8b-instant`) — resume parsing (`parseResumeText`)
-    and job-match scoring (`scoreJobMatch`). Switched from Gemini because its
-    free tier (as low as 20 requests/day for `generateContent`) was the root
-    cause of matches never appearing — Groq's free tier gives this model
-    14,400 requests/day.
+  - **Groq** — resume parsing (`parseResumeText`, `llama-3.1-8b-instant`,
+    14,400 req/day free) and job-match scoring (`scoreJobMatch`,
+    `llama-3.3-70b-versatile`, 1,000 req/day free, falls back to
+    `openai/gpt-oss-120b` on daily-quota exhaustion — see issue #24).
+    Switched from Gemini because its free tier (as low as 20 requests/day
+    for `generateContent`) was the root cause of matches never appearing.
   - A free deterministic parser (`src/lib/deterministic_parser.ts`) handles
     most resume/job-requirement extraction without calling any LLM at all;
     job-requirements extraction *never* calls an LLM anymore (that data isn't
@@ -267,6 +268,42 @@ whichever specific source files are relevant to the next task.
     approval wait — unlike the CareerOneStop friction that got it rejected).
     Not yet live-tested against a real key.
 
+24. **Match/gap/suggestion quality feedback** — user feedback after the app
+    was fully working: matches, gap_analysis, and resume_suggestions felt
+    generic rather than sharply tailored.
+    → `src/lib/ai.ts`:
+    - Rewrote `scoreJobMatch`'s system prompt with explicit 0-10 rubric
+      anchors per dimension (0-2 none, 3-5 partial, 6-8 solid, 9-10
+      near-perfect), a requirement that the model first identify the job's
+      actual stated requirements before comparing, and a hard rule that
+      every `gap_analysis`/`resume_suggestions` item must cite a specific
+      skill/tool/requirement from the job description — generic filler like
+      "could improve technical skills" is explicitly banned. `match_score`
+      is now explicitly a holistic weighted judgment (skills/responsibilities
+      weighted above raw experience), not a mechanical average.
+    - Tightened `parseResumeText`'s prompt to forbid inferring unstated
+      skills and to compute `years_experience` from actual date-range math
+      rather than guessing from title seniority.
+    - `scoreJobMatch` moved from `llama-3.1-8b-instant` to
+      **`llama-3.3-70b-versatile`** for better nuanced judgment (free tier:
+      1,000 req/day, 100K tokens/day — comfortable given the existing
+      8-jobs/run scoring cap). `parseResumeText` stays on the 8b model
+      (higher volume, more mechanical task, doesn't need the upgrade).
+    - Added **`openai/gpt-oss-120b`** (also free on Groq, same 1,000 req/day
+      but 200K tokens/day) as a same-key fallback for scoring only: if
+      `llama-3.3-70b-versatile` hits its own daily quota (429 with "per day"
+      in the message), `scoreJobMatch` transparently retries the same
+      request on `gpt-oss-120b` instead of failing that job's scoring for
+      the rest of the day — roughly doubles effective daily scoring
+      headroom since the two models have independent quota buckets.
+      `withGroqRetry` also now fails fast (no wasted retry attempts) on a
+      daily-quota 429, mirroring the existing Gemini logic. Shared prompt
+      logic extracted into `buildScoringMessages()` so both models get
+      identical instructions. **Not yet observed against real traffic** —
+      worth checking Vercel logs after a few real search runs to see if
+      gap/suggestion text actually reads more specific, and whether the
+      gpt-oss-120b fallback path ever triggers.
+
 ## Evaluated but not implemented
 
 - **Findwork.dev** as an additional job source — plausible, but requires a
@@ -285,7 +322,7 @@ whichever specific source files are relevant to the next task.
 | `server.ts` | Express app, all API routes, central job-matching pipeline |
 | `src/lib/auth.ts` | JWT verification / `resolveUserId` |
 | `src/lib/db.ts` | `DbService` — Supabase + in-memory dual-mode data layer |
-| `src/lib/ai.ts` | Gemini client (embeddings only) + Groq client (resume parsing, match scoring) + both retry helpers |
+| `src/lib/ai.ts` | Gemini client (embeddings only) + Groq client (resume parsing on 8b, match scoring on 70b w/ gpt-oss-120b fallback) + both retry helpers |
 | `src/lib/embeddings.ts` | Gemini embedding generation |
 | `src/lib/deterministic_parser.ts` | Free regex/dictionary resume & job parsing |
 | `src/lib/job_sources.ts` | Adzuna/JSearch (OpenWeb Ninja direct)/Remotive/Arbeitnow/Jooble adapters |
@@ -299,11 +336,14 @@ whichever specific source files are relevant to the next task.
 
 ## Open items / next steps
 
-- **Not yet tested end-to-end**: the Groq swap has been type-checked, build-
-  verified, and SDK-load-verified, but never called against the real Groq
-  API (no key available in the sandbox this was built in). User needs to add
-  `GROQ_API_KEY` to Vercel, redeploy, and confirm "Search For New Jobs"
-  actually produces matches now.
+- **Confirmed working end-to-end** (per user, all prior issues resolved):
+  Groq-based parsing/scoring is live and producing matches.
+- **New scoring prompt + model changes (issue #24) not yet observed against
+  real traffic** — after a few more real "Search For New Jobs" runs, check
+  whether gap_analysis/resume_suggestions read as more specific/job-grounded,
+  and check Vercel logs for whether the `gpt-oss-120b` fallback path is ever
+  triggered (would only show up once `llama-3.3-70b-versatile`'s 1,000
+  req/day is exhausted).
 - Decide whether to add Findwork.dev as a second job source.
 - If Groq's 14,400/day ever becomes limiting (unlikely at current scale, ~10
   users), consider its paid tier or a second provider for overflow.
