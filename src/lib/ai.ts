@@ -66,7 +66,15 @@ export function getGeminiClient(): GoogleGenAI {
 // llama-3.1-8b-instant 14,400 requests/day (vs. Gemini's free-tier cap of as
 // low as 20/day for generateContent), which is what these two calls need.
 // ==========================================
+// Parsing runs on every resume save/edit (higher volume, more mechanical
+// task) — stays on the fast/high-quota 8b model.
 const GROQ_MODEL = "llama-3.1-8b-instant";
+// Scoring is capped at 8 fresh calls/run (see server.ts SCORING_CAP_PER_RUN)
+// and needs better judgment on nuanced fit, so it gets the larger model.
+// Free tier: 1,000 req/day, 100K tokens/day — comfortable at this cap/scale,
+// but tokens/day is worth watching if usage grows (prompts carry the full
+// job description + resume JSON).
+const GROQ_SCORING_MODEL = "llama-3.3-70b-versatile";
 let groqInstance: Groq | null = null;
 
 function getGroqClient(): Groq {
@@ -117,9 +125,13 @@ export async function parseResumeText(text: string): Promise<ParsedResume> {
     messages: [
       {
         role: "system",
-        content: `You are an expert resume parser and technical recruiter. Extract details with strict accuracy. If a value isn't found, default to an empty list or 0 years of experience. Respond ONLY with a single JSON object matching exactly this shape, no other text:
+        content: `You are an expert resume parser and technical recruiter. Extract details with strict accuracy, using only what the resume text actually states — never invent or infer a skill, tool, or title that isn't written or clearly implied by described work. If a value isn't found, default to an empty list or 0 years of experience.
+
+For years_experience: sum actual date ranges across roles (accounting for overlaps — don't double-count concurrent roles), not a guess from seniority-sounding titles.
+
+Respond ONLY with a single JSON object matching exactly this shape, no other text:
 {
-  "skills": string[] (core technical and soft skills),
+  "skills": string[] (core technical and soft skills, each one specific and resume-grounded — not generic filler like "hardworking" unless the resume itself uses that framing),
   "titles": string[] (job titles previously held or targeted),
   "years_experience": integer (total years of professional work experience),
   "education": string[] (degrees, certifications, educational achievements),
@@ -169,16 +181,31 @@ export async function scoreJobMatch(
   const groq = getGroqClient();
 
   const response = await withGroqRetry(() => groq.chat.completions.create({
-    model: GROQ_MODEL,
+    model: GROQ_SCORING_MODEL,
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: `You are a career development engine scoring how well a resume matches a job. Evaluate strictly and realistically:
-- experience_match: compare resume years_experience vs job requirements.
-- skills_match: evaluate matching skills/tools vs required skills.
-- responsibilities_match: compare targeted roles/titles vs job title/role functions.
-Provide detailed gap_analysis and custom resume_suggestions (e.g. "Add specific experience with X tool", "Mention impact metrics using Y skill").
+        content: `You are a strict, evidence-based technical recruiter scoring how well a candidate's resume matches a specific job. Be realistic — most resumes are partial matches, not perfect ones. Do not inflate scores to be encouraging.
+
+First, identify the job's actual required skills, tools, experience level, and responsibilities directly from the job description text (ignore fluff like generic company boilerplate). Then compare each dimension of the resume against exactly those requirements, citing specifics rather than general impressions.
+
+Score each dimension 0-10 using this rubric:
+- 0-2: little to no overlap with what the job asks for.
+- 3-5: some relevant overlap, but clear, significant gaps remain.
+- 6-8: solid overlap on most stated requirements, with only minor gaps.
+- 9-10: matches nearly all stated requirements with direct, specific evidence.
+
+Dimensions:
+- experience_match: resume's years_experience and role history against the job's stated seniority/experience needs.
+- skills_match: overlap between resume skills/tools and the specific skills/tools the job description names — partial credit for closely related/transferable skills, not for vaguely-adjacent ones.
+- responsibilities_match: how closely the resume's past titles and described work align with this job's actual day-to-day responsibilities, not just title similarity.
+match_score is a holistic overall rating (not a mechanical average) — weight skills_match and responsibilities_match slightly more heavily than experience_match, since a strong skills fit with slightly less tenure usually matters more than the reverse.
+
+For gap_analysis: list only gaps that are actually significant to this specific job — each item must name the exact skill/tool/requirement from the job description that's missing or weak in the resume. Never write vague filler like "could improve technical skills."
+
+For resume_suggestions: each suggestion must be concrete and actionable, referencing a specific requirement from this job description and how the resume should address it (e.g. "Add a bullet quantifying your experience with [specific tool from the job] since the role explicitly requires it" — not "highlight relevant skills"). If the resume is already a strong match, suggestions can focus on quantifying impact/metrics rather than inventing new gaps.
+
 Respond ONLY with a single JSON object matching exactly this shape, no other text:
 {
   "match_score": integer 0-10 (overall weighted rating),
@@ -187,8 +214,8 @@ Respond ONLY with a single JSON object matching exactly this shape, no other tex
     "skills_match": integer 0-10,
     "responsibilities_match": integer 0-10
   },
-  "gap_analysis": string[] (missing skills/tools/experience highlighted as important in the job),
-  "resume_suggestions": string[] (actionable, concrete resume modifications for this exact job)
+  "gap_analysis": string[] (specific, job-grounded gaps only — empty array if genuinely none),
+  "resume_suggestions": string[] (concrete, job-grounded, actionable resume edits)
 }`
       },
       {
